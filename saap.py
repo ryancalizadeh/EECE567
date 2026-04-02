@@ -34,9 +34,11 @@ class Network(Projectable):
 
 		self.gram_matrix_inv = np.linalg.inv(Ybus @ Ybus.conj().T + np.eye(n))
 
-		self.projector = None
-
-
+		A = np.eye(n) - Ybus.conj().T @ self.gram_matrix_inv @ Ybus
+		B = Ybus.conj().T @ self.gram_matrix_inv
+		C = self.gram_matrix_inv @ Ybus
+		D = np.eye(n) - self.gram_matrix_inv
+		self.projector = np.block([[A, B], [C, D]])
 
 	def project(self, trajectory: Trajectory) -> Trajectory:
 		"""
@@ -265,3 +267,30 @@ axs.plot(x0.w['var1'][0, 0].real, x0.w['var2'][0, 0].real, 'ro', label='Initial 
 axs.legend()
 plt.grid()
 plt.show()
+
+def test_network():
+	n = 3
+	Ybus = np.array([[6, -1, -5],
+				  [-1, 7, -6],
+				  [-5, -6, 11]], dtype=np.complex64)
+	network = Network(n, Ybus)
+
+	vars = {
+		"voltage": n,
+		"current": n
+	}
+	traj = Trajectory(2, vars)
+	traj.w['voltage'] = np.array([[1.0 + 1.0j, 1.02 + 0.8j], [1.0 + 0.5j, 1.2 + 0.6j], [1.0 + 0.3j, 1.2 + 0.4j]], dtype=np.complex64)
+	traj.w['current'] = np.array([[0.0 + 0.1j, 0.5 + 0.2j], [0.0 + 0.15j, 0.4 + 0.25j], [0.0 + 0.2j, 0.3 + 0.1j]], dtype=np.complex64)
+
+	projected_traj = network.project(traj)
+
+	print("Projected Voltages:")
+	print(projected_traj.w['voltage'])
+	print("Projected Currents:")
+	print(projected_traj.w['current'])
+
+	print("Residual:")
+	print(np.linalg.norm(Ybus @ projected_traj.w['voltage'] - projected_traj.w['current']))
+
+test_network()
