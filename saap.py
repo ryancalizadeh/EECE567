@@ -33,7 +33,7 @@ class Network(Projectable):
 		self.Ybus = Ybus
 
 		self.gram_matrix_inv = np.linalg.inv(Ybus @ Ybus.conj().T + np.eye(n))
-		
+
 		self.projector = None
 
 
@@ -54,14 +54,12 @@ class Network(Projectable):
 		"""
 		
 		ret = trajectory.copy()
-		VI = ret.get_subtrajectory(["V", "I"])
+		VI = ret.get_subtrajectory(["voltage", "current"])
 		projected_VI = self.projector @ VI
-		ret.set_subtrajectory(["V", "I"], projected_VI)
+		ret.set_subtrajectory(["voltage", "current"], projected_VI)
 
 		return ret
 
-		   
-		
 
 class Trajectory:
 	"""
@@ -79,34 +77,11 @@ class Trajectory:
 		self.T = T
 		self.vars = vars
 		self.q = sum(vars.values())
-		self.w = np.zeros((self.q, self.T), dtype=np.complex64)
+		self.w = {key: np.zeros((size, self.T), dtype=np.complex64) for key, size in vars.items()}
 
-	def get_variable_indices(self, var_name: str) -> slice:
+	def get_subtrajectory(self, var_names: list[str]) -> np.ndarray:
 		"""
-		Returns the slice indices for the given variable name.
-
-		Parameters
-		----------
-		var_name : str
-			The name of the variable to get indices for.
-
-		Returns
-		-------
-		slice
-			The slice object representing the indices of the variable in the trajectory.
-		"""
-
-		start_index = 0
-		for key, size in self.vars.items():
-			if key == var_name:
-				return slice(start_index, start_index + size)
-			start_index += size
-
-		raise ValueError(f"Variable '{var_name}' not found in trajectory.")
-	
-	def   get_subtrajectory(self, var_names: list[str]) -> np.ndarray:
-		"""
-		Returns the submatrix w[indices, :] where indices correspondes to the indices of each variable contained in the list var_names.
+		Returns the submatrix corresponding to the given variable names.
 		
 		Parameters
 		----------
@@ -114,15 +89,15 @@ class Trajectory:
 			The names of the variables to extract.
 		"""
 
-		indices = []
-		for var_name in var_names:
-			s = self.get_variable_indices(var_name)
-			indices.extend(range(s.start, s.stop))
-		return self.w[indices, :]
+		if not var_names:
+			return np.array([], dtype=np.complex64).reshape(0, self.T)
+
+		sub_trajectories = [self.w[var_name] for var_name in var_names]
+		return np.vstack(sub_trajectories)
 
 	def set_subtrajectory(self, var_names: list[str], values: np.ndarray) -> None:
 		"""
-		Sets the submatrix w[indices, :] where indices correspond to the indices of each variable contained in the list var_names.
+		Sets the sub-trajectories for the given variable names.
 		
 		Parameters
 		----------
@@ -132,28 +107,30 @@ class Trajectory:
 			The values to set for the specified variables.
 		"""
 
-		indices = []
+		start_row = 0
 		for var_name in var_names:
-			s = self.get_variable_indices(var_name)
-			indices.extend(range(s.start, s.stop))
-		self.w[indices, :] = values
+			num_rows = self.vars[var_name]
+			self.w[var_name] = values[start_row : start_row + num_rows, :]
+			start_row += num_rows
 
 	def __add__(self, other):
 		if not isinstance(other, Trajectory):
 			return NotImplemented
-		if self.T != other.T or self.q != other.q:
-			raise ValueError("Trajectories must have the same dimensions for addition.")
+		if self.T != other.T or self.vars != other.vars:
+			raise ValueError("Trajectories must have the same dimensions and variables for addition.")
 		result = Trajectory(self.T, self.vars)
-		result.w = self.w + other.w
+		for var_name in self.vars:
+			result.w[var_name] = self.w[var_name] + other.w[var_name]
 		return result
 	
 	def __sub__(self, other):
 		if not isinstance(other, Trajectory):
 			return NotImplemented
-		if self.T != other.T or self.q != other.q:
-			raise ValueError("Trajectories must have the same dimensions for subtraction.")
+		if self.T != other.T or self.vars != other.vars:
+			raise ValueError("Trajectories must have the same dimensions and variables for subtraction.")
 		result = Trajectory(self.T, self.vars)
-		result.w = self.w - other.w
+		for var_name in self.vars:
+			result.w[var_name] = self.w[var_name] - other.w[var_name]
 		return result
 	
 	def copy(self):
@@ -166,11 +143,13 @@ class Trajectory:
 			A new trajectory with the same dimensions and data.
 		"""
 		result = Trajectory(self.T, self.vars)
-		result.w = self.w.copy()
+		result.w = {key: value.copy() for key, value in self.w.items()}
 		return result
 	
 	def norm(self):
-		return np.linalg.norm(self.w)
+		# Concatenate all variable trajectories into a single array and compute the norm
+		all_vars = np.vstack(list(self.w.values()))
+		return np.linalg.norm(all_vars)
 
 def dykstra(sets: list[Projectable], x0: Trajectory, threshold=1e-6, max_iterations=1000) -> Trajectory:
 	increments = []
@@ -221,7 +200,7 @@ num_iters = 100
 T = 10
 
 traj = Trajectory(T, vars)
-network = Network(n, m)
+network = Network(n, np.zeros((n, n), dtype=np.complex64))
 
 
 # Testing
@@ -234,10 +213,11 @@ class Circle(Projectable):
 		norm = trajectory.norm()
 		if norm > self.radius:
 			projected_traj = Trajectory(trajectory.T, trajectory.vars)
-			projected_traj.w = (trajectory.w / norm) * self.radius
+			for var_name in trajectory.vars:
+				projected_traj.w[var_name] = (trajectory.w[var_name] / norm) * self.radius
 			return projected_traj
 		else:
-			return trajectory
+			return trajectory.copy()
 
 class Box(Projectable):
 	def __init__(self, lower_bound, upper_bound):
@@ -247,7 +227,8 @@ class Box(Projectable):
 	def project(self, trajectory: Trajectory) -> Trajectory:
 		# Simple projection onto a box defined by lower and upper bounds
 		projected_traj = Trajectory(trajectory.T, trajectory.vars)
-		projected_traj.w = np.clip(trajectory.w, self.lower_bound, self.upper_bound)
+		for var_name in trajectory.vars:
+			projected_traj.w[var_name] = np.clip(trajectory.w[var_name], self.lower_bound, self.upper_bound)
 		return projected_traj
 
 a = -0.5
@@ -257,7 +238,8 @@ c1 = Circle(1)
 
 sets = [b1, c1]
 x0 = Trajectory(1, {"var1": 1, "var2": 1})
-x0.w = np.array([-1.0, 1.0])  # Starting point outside both sets
+x0.w['var1'] = np.array([[-1.0]], dtype=np.complex64)
+x0.w['var2'] = np.array([[1.0]], dtype=np.complex64)
 
 result = dykstra(sets, x0)
 
@@ -278,8 +260,8 @@ circle = patches.Circle((0, 0), 1, fill=False,
 					edgecolor='red', label='Circle')
 axs.add_patch(circle)
 # Plot the trajectory
-axs.plot(result.w[0], result.w[1], 'go', label='Projected Trajectory')
-axs.plot(x0.w[0], x0.w[1], 'ro', label='Initial Trajectory')
+axs.plot(result.w['var1'][0, 0].real, result.w['var2'][0, 0].real, 'go', label='Projected Trajectory')
+axs.plot(x0.w['var1'][0, 0].real, x0.w['var2'][0, 0].real, 'ro', label='Initial Trajectory')
 axs.legend()
 plt.grid()
-
+plt.show()
