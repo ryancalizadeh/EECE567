@@ -1,0 +1,246 @@
+Vs = trajectory.get_subtrajectory(["voltage"])
+		Is = trajectory.get_subtrajectory(["current"])
+		T = trajectory.T
+
+		V_opt = cp.Variable(Vs.shape, complex=True)
+		I_opt = cp.Variable(Is.shape, complex=True)
+
+		delta = cp.Variable((1, T), complex=False)
+		omega = cp.Variable((1, T), complex=False)
+		Tm = cp.Variable((1, T), complex=False)
+
+		objective = cp.Minimize(cp.norm(V_opt - Vs) + cp.norm(I_opt - Is))
+
+		constraints = []
+		for t in range(trajectory.T):
+			# Algebraic constraints
+			constraints.append(V_opt[:, t] == self.E * cp.exp(1j * delta[:, t]) - self.Xd * I_opt[:, t])
+			
+			# Dynamic constraints (using trapezoidal rule)
+			if t > 0:
+				constraints.append(delta[:, t] == delta[:, t-1] + self.dt/2 * (omega[:, t] + omega[:, t-1] - self.ws*2))
+				constraints.append(omega[:, t] == omega[:, t-1] + self.ws / (2*self.H) * self.dt/2 * (\
+					Tm[:, t] + Tm[:, t-1] \
+					- self.D * (omega[:, t] + omega[:, t-1] - self.ws*2) \
+					- np.real(self.E*np.exp(1j*delta[:, t]) * np.conj(I_opt[:, t])))))
+				
+
+
+Apr 6:
+
+N = trajectory.N
+		dt = trajectory.dt
+		
+		# Extract measurement data
+		V_traj = trajectory.get_var_names(["voltage"])
+		I_traj = trajectory.get_var_names(["current"])
+		V_traj_re = np.real(V_traj)
+		V_traj_im = np.imag(V_traj)
+		I_traj_re = np.real(I_traj)
+		I_traj_im = np.imag(I_traj)
+		
+		# Total number of variables: delta, omega, Tm, V_re, V_im, I_re, I_im
+		n_vars = 7 * N
+		
+		# Total number of constraints: 3 initial conditions + 3*(N-1) dynamics + 2*N algebraic
+		n_constraints = 3 + 3 * (N - 1) + 2 * N
+		
+		# Define helper function to compute constraints and objective residuals
+	
+		def kkt_residuals(z):
+			"""
+			Compute KKT residuals for the optimization problem.
+			z = [x; lambda] where x are decision variables and lambda are Lagrange multipliers.
+			"""
+			x = z[:n_vars]
+			lambdas = z[n_vars:]
+			
+			# Split variables
+			delta = x[0*N:1*N]
+			omega = x[1*N:2*N]
+			Tm = x[2*N:3*N]
+			V_re = x[3*N:4*N]
+			V_im = x[4*N:5*N]
+			I_re = x[5*N:6*N]
+			I_im = x[6*N:7*N]
+			
+			# Build constraints vector
+			constraints_list = []
+			
+			# Initial conditions
+			constraints_list.append(delta[0])
+			constraints_list.append(omega[0] - self.ws)
+			constraints_list.append(Tm[0] - self.Pc)
+			
+			# Dynamics constraints (trapezoidal rule)
+			for k in range(N - 1):
+				# delta_dot = omega - ws
+				f_delta_k = omega[k] - self.ws
+				f_delta_k1 = omega[k+1] - self.ws
+				constraints_list.append(delta[k+1] - delta[k] - (dt/2) * (f_delta_k + f_delta_k1))
+				
+				# omega_dot
+				E_k_re = self.E * jnp.cos(delta[k] + self.delta0)
+				E_k_im = self.E * jnp.sin(delta[k] + self.delta0)
+				Pe_k = E_k_re * I_re[k] + E_k_im * I_im[k]
+				
+				E_k1_re = self.E * jnp.cos(delta[k+1] + self.delta0)
+				E_k1_im = self.E * jnp.sin(delta[k+1] + self.delta0)
+				Pe_k1 = E_k1_re * I_re[k+1] + E_k1_im * I_im[k+1]
+				
+				f_omega_k = (Tm[k] - Pe_k - self.D*(omega[k]/self.ws - 1)) * self.ws/(2*self.H)
+				f_omega_k1 = (Tm[k+1] - Pe_k1 - self.D*(omega[k+1]/self.ws - 1)) * self.ws/(2*self.H)
+				constraints_list.append(omega[k+1] - omega[k] - (dt/2) * (f_omega_k + f_omega_k1))
+				
+				# Tm_dot
+				f_Tm_k = (-Tm[k] + self.Pc - 1/self.R * (omega[k]/self.ws - 1)) / self.Tsv
+				f_Tm_k1 = (-Tm[k+1] + self.Pc - 1/self.R * (omega[k+1]/self.ws - 1)) / self.Tsv
+				constraints_list.append(Tm[k+1] - Tm[k] - (dt/2) * (f_Tm_k + f_Tm_k1))
+			
+			# Algebraic constraints
+			for k in range(N):
+				E_k_re = self.E * jnp.cos(delta[k] + self.delta0)
+				E_k_im = self.E * jnp.sin(delta[k] + self.delta0)
+				# E - Xd*I - V = 0
+				alg_re = E_k_re - self.Xd * I_re[k] - V_re[k]
+				alg_im = E_k_im - self.Xd * I_im[k] - V_im[k]
+				constraints_list.append(alg_re)
+				constraints_list.append(alg_im)
+			
+			constraints_vec = jnp.array(constraints_list)
+			
+			# Objective function: ||v - v_meas||^2 + ||i - i_meas||^2
+			obj = 0.0
+			for k in range(N):
+				obj += (V_re[k] - V_traj_re[0, k])**2 + (V_im[k] - V_traj_im[0, k])**2 + \
+					   (I_re[k] - I_traj_re[0, k])**2 + (I_im[k] - I_traj_im[0, k])**2
+			
+			# Define Lagrangian as a function for gradient computation
+			def lagrangian_func(z_var):
+				x_var = z_var[:n_vars]
+				lambdas_var = z_var[n_vars:]
+				
+				# Recompute constraints with new x
+				delta_var = x_var[0*N:1*N]
+				omega_var = x_var[1*N:2*N]
+				Tm_var = x_var[2*N:3*N]
+				V_re_var = x_var[3*N:4*N]
+				V_im_var = x_var[4*N:5*N]
+				I_re_var = x_var[5*N:6*N]
+				I_im_var = x_var[6*N:7*N]
+				
+				# Recompute objective
+				obj_var = 0.0
+				for k in range(N):
+					obj_var += (V_re_var[k] - V_traj_re[0, k])**2 + (V_im_var[k] - V_traj_im[0, k])**2 + \
+							   (I_re_var[k] - I_traj_re[0, k])**2 + (I_im_var[k] - I_traj_im[0, k])**2
+				
+				# Recompute constraints
+				constraints_list_var = []
+				constraints_list_var.append(delta_var[0])
+				constraints_list_var.append(omega_var[0] - self.ws)
+				constraints_list_var.append(Tm_var[0] - self.Pc)
+				
+				for k in range(N - 1):
+					f_delta_k_var = omega_var[k] - self.ws
+					f_delta_k1_var = omega_var[k+1] - self.ws
+					constraints_list_var.append(delta_var[k+1] - delta_var[k] - (dt/2) * (f_delta_k_var + f_delta_k1_var))
+					
+					E_k_re_var = self.E * jnp.cos(delta_var[k] + self.delta0)
+					E_k_im_var = self.E * jnp.sin(delta_var[k] + self.delta0)
+					Pe_k_var = E_k_re_var * I_re_var[k] + E_k_im_var * I_im_var[k]
+					
+					E_k1_re_var = self.E * jnp.cos(delta_var[k+1] + self.delta0)
+					E_k1_im_var = self.E * jnp.sin(delta_var[k+1] + self.delta0)
+					Pe_k1_var = E_k1_re_var * I_re_var[k+1] + E_k1_im_var * I_im_var[k+1]
+					
+					f_omega_k_var = (Tm_var[k] - Pe_k_var - self.D*(omega_var[k]/self.ws - 1)) * self.ws/(2*self.H)
+					f_omega_k1_var = (Tm_var[k+1] - Pe_k1_var - self.D*(omega_var[k+1]/self.ws - 1)) * self.ws/(2*self.H)
+					constraints_list_var.append(omega_var[k+1] - omega_var[k] - (dt/2) * (f_omega_k_var + f_omega_k1_var))
+					
+					f_Tm_k_var = (-Tm_var[k] + self.Pc - 1/self.R * (omega_var[k]/self.ws - 1)) / self.Tsv
+					f_Tm_k1_var = (-Tm_var[k+1] + self.Pc - 1/self.R * (omega_var[k+1]/self.ws - 1)) / self.Tsv
+					constraints_list_var.append(Tm_var[k+1] - Tm_var[k] - (dt/2) * (f_Tm_k_var + f_Tm_k1_var))
+				
+				for k in range(N):
+					E_k_re_var = self.E * jnp.cos(delta_var[k] + self.delta0)
+					E_k_im_var = self.E * jnp.sin(delta_var[k] + self.delta0)
+					alg_re_var = E_k_re_var - self.Xd * I_re_var[k] - V_re_var[k]
+					alg_im_var = E_k_im_var - self.Xd * I_im_var[k] - V_im_var[k]
+					constraints_list_var.append(alg_re_var)
+					constraints_list_var.append(alg_im_var)
+				
+				constraints_vec_var = jnp.array(constraints_list_var)
+				return obj_var + jnp.dot(lambdas_var, constraints_vec_var)
+			
+			# Compute gradient of Lagrangian w.r.t. x
+			grad_L = jax.grad(lagrangian_func)(z)
+			
+			# KKT conditions: gradient of Lagrangian w.r.t. x and constraints
+			kkt_vec = jnp.concatenate([
+				grad_L[:n_vars],  # Gradient w.r.t. x
+				constraints_vec  # Constraints
+			])
+			
+			return kkt_vec
+		
+		# Compute Jacobian using JAX automatic differentiation
+		kkt_jacobian_func = jacobian(kkt_residuals)
+		
+		# Initial guess for decision variables
+		delta_init = jnp.array(np.angle(V_traj_re[0] + 1j*V_traj_im[0] + self.Xd * (I_traj_re[0] + 1j*I_traj_im[0])) - self.delta0)
+		omega_init = jnp.full(N, self.ws)
+		Tm_init = jnp.full(N, self.Pc)
+		
+		x_init = jnp.concatenate([
+			delta_init, omega_init, Tm_init,
+			jnp.array(V_traj_re[0]),
+			jnp.array(V_traj_im[0]),
+			jnp.array(I_traj_re[0]),
+			jnp.array(I_traj_im[0])
+		])
+		
+		# Initial guess for Lagrange multipliers
+		lambda_init = jnp.zeros(n_constraints)
+		if self.prev_lambda_sol is not None and len(self.prev_lambda_sol) == n_constraints:
+			lambda_init = jnp.array(self.prev_lambda_sol)
+		
+		z = jnp.concatenate([x_init, lambda_init])
+		
+		# Newton's method
+		for i in range(self.max_iter):
+			print(f"Iteration {i+1}/{self.max_iter}")
+			F_val = np.array(kkt_residuals(z))
+			residual_norm = np.linalg.norm(F_val)
+			print(f"Residual norm: {residual_norm:.8e}")
+			
+			if residual_norm < self.tol:
+				print("Converged!")
+				break
+			
+			J_val = np.array(kkt_jacobian_func(z))
+			
+			# Solve the linear system J * dz = -F
+			try:
+				dz = np.linalg.solve(J_val, -F_val)
+			except np.linalg.LinAlgError:
+				# Use pseudo-inverse if Jacobian is singular
+				print(f"Jacobian is singular, using pseudo-inverse")
+				dz = np.linalg.pinv(J_val) @ -F_val
+			
+			z = np.array(z) + dz
+			z = jnp.array(z)
+		
+		self.prev_lambda_sol = np.array(z[n_vars:])
+		
+		# Extract projected trajectory
+		x_sol = np.array(z[:n_vars])
+		
+		delta_sol, omega_sol, Tm_sol, V_re_sol, V_im_sol, I_re_sol, I_im_sol = np.array_split(x_sol, 7)
+		
+		ret = trajectory.copy()
+		
+		ret.set_var_names(["voltage"], V_re_sol + 1j*V_im_sol)
+		ret.set_var_names(["current"], I_re_sol + 1j*I_im_sol)
+		
+		return ret
