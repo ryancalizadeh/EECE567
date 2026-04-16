@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
 from typing import Callable
 import casadi as ca
+from scipy.optimize import minimize_scalar
+import cvxpy as cp
 
 
 class Projectable(ABC):
@@ -67,7 +69,7 @@ class Network(Projectable):
 
 class Generator(Projectable):
 	"""
-	A class implementing projections onto a single classical generators behaviour
+	A class implementing projections onto a single classical generator + fast governor behaviour
 	"""
 
 	def __init__(self, E, Zd, H, D, Tsv, R, delta0, Pc, max_iter=20, tol=1e-5):
@@ -113,10 +115,18 @@ class Generator(Projectable):
 		# Extract measurement data
 		V_traj = trajectory.get_var_names(["voltage"])
 		I_traj = trajectory.get_var_names(["current"])
+		delta_traj = trajectory.get_var_names(["delta"])
+		omega_traj = trajectory.get_var_names(["omega"])
+		Tm_traj = trajectory.get_var_names(["Tm"])
+
 		V_traj_re = np.real(V_traj)
 		V_traj_im = np.imag(V_traj)
 		I_traj_re = np.real(I_traj)
 		I_traj_im = np.imag(I_traj)
+		delta_traj = np.real(delta_traj)
+		omega_traj = np.real(omega_traj)
+		Tm_traj = np.real(Tm_traj)
+
 
 		# Create optimization variables (as 2D matrix for easier indexing)
 		x_matrix = ca.MX.sym('x', (n_vars, N))  # type: ignore
@@ -138,6 +148,16 @@ class Generator(Projectable):
 		constraints_list.append(delta[0])
 		constraints_list.append(omega[0] - self.ws)
 		constraints_list.append(Tm[0] - self.Pc)
+
+		# # Add temporary constraint to fix variables for the first 0.5 seconds
+		# for k in range(min(int(0.5/dt), N)):
+		# 	constraints_list.append(V_re[k] - V_traj_re[0, k])
+		# 	constraints_list.append(V_im[k] - V_traj_im[0, k])
+		# 	constraints_list.append(I_re[k] - I_traj_re[0, k])
+		# 	constraints_list.append(I_im[k] - I_traj_im[0, k])
+		# 	constraints_list.append(omega[k] - self.ws)
+		# 	constraints_list.append(Tm[k] - self.Pc)
+		# 	constraints_list.append(delta[k+1] - delta[k])
 		
 		# Dynamics constraints (trapezoidal rule)
 		for k in range(N - 1):
@@ -180,7 +200,7 @@ class Generator(Projectable):
 		ubg = np.zeros(constraints_vec.shape[0])
 
 		# Objective function: minimize ||w - trajectory||_2^2
-		obj = ca.sumsqr(V_re - V_traj_re) + ca.sumsqr(V_im - V_traj_im) + ca.sumsqr(I_re - I_traj_re) + ca.sumsqr(I_im - I_traj_im)
+		obj = ca.sumsqr(V_re - V_traj_re) + ca.sumsqr(V_im - V_traj_im) + ca.sumsqr(I_re - I_traj_re) + ca.sumsqr(I_im - I_traj_im) + ca.sumsqr(omega - omega_traj) + ca.sumsqr(Tm - Tm_traj) + ca.sumsqr(delta - delta_traj)
 
 		opts = {
 			'ipopt.print_level': 5, # 0 for silent, 5 for detailed output
@@ -210,38 +230,57 @@ class Generator(Projectable):
 		x_init = np.column_stack([delta_guess, omega_guess, Tm_guess, V_re_guess, V_im_guess, I_re_guess, I_im_guess])
 		initial_guess = x_init.flatten()
 
+		lbx = np.full((N, n_vars), -np.inf)
+		ubx = np.full((N, n_vars), np.inf)
+		lbx[:, 1] = self.ws - 0.08
+		ubx[:, 1] = self.ws + 0.08
+
 		# Solve NLP
 		print("Solving NLP...")
-		sol = nlp_solver(x0=initial_guess, lbg=lbg, ubg=ubg)
+		sol = nlp_solver(x0=initial_guess, lbg=lbg, ubg=ubg, lbx=lbx.flatten(), ubx=ubx.flatten())
 
 		# Extract solution and reshape back to 2D form
 		sol_x_flat = sol['x'].full().flatten()
-		sol_x = sol_x_flat.reshape((n_vars, N))
-		
-		sol_delta = sol_x[0, :]
-		sol_omega = sol_x[1, :]
-		sol_Tm = sol_x[2, :]
+		sol_x = sol_x_flat.reshape((N, n_vars)).T
+
+		sol_delta = sol_x[0, :].reshape(1, -1)
+		sol_omega = sol_x[1, :].reshape(1, -1)
+		sol_Tm = sol_x[2, :].reshape(1, -1)
 		sol_V_re = sol_x[3, :]
 		sol_V_im = sol_x[4, :]
 		sol_I_re = sol_x[5, :]
 		sol_I_im = sol_x[6, :]
-		sol_V = sol_V_re + 1j*sol_V_im
-		sol_I = sol_I_re + 1j*sol_I_im
+		sol_V = (sol_V_re + 1j*sol_V_im).reshape(1, -1)
+		sol_I = (sol_I_re + 1j*sol_I_im).reshape(1, -1)
 
-		# Plot omega
-		plt.figure(figsize=(10, 6))
-		plt.plot(np.arange(N)*dt, sol_omega, label='Projected Omega')
-		plt.axhline(self.ws, color='r', linestyle='--', label='Synchronous Speed')
-		plt.xlabel('Time (s)')
-		plt.ylabel('Rotor Speed (rad/s)')
-		plt.title('Projected Rotor Speed over Time')
-		plt.legend()
-		plt.grid(True)
-		plt.show()
+		# # Plot omega
+		# fig, axs = plt.subplots(1, 1, figsize=(10, 5))
+		# axs.plot(np.arange(N)*dt, sol_omega[0, :], label='Projected Omega')
+		# axs.axhline(self.ws, color='r', linestyle='--', label='Synchronous Speed')
+		# axs.set_title('Projected Rotor Speed (Omega)')
+		# axs.set_xlabel('Time (s)')
+		# axs.set_ylabel('Omega (rad/s)')
+		# axs.set_ylim(self.ws - 0.08, self.ws + 0.08)
+		# axs.legend()
+		# plt.grid()
+		# plt.show()
 
+		# # Plot voltage
+		# fig, axs = plt.subplots(1, 1, figsize=(10, 5))
+		# axs.plot(np.arange(N)*dt, sol_V_re, label='Projected V_re')
+		# axs.plot(np.arange(N)*dt, sol_V_im, label='Projected V_im')
+		# axs.set_title('Projected Voltage')
+		# axs.set_xlabel('Time (s)')
+		# axs.set_ylabel('Voltage (V)')
+		# axs.legend()
+		# plt.grid()
+		# plt.show()
 
 		ret.set_var_names(["voltage"], sol_V)
 		ret.set_var_names(["current"], sol_I)
+		ret.set_var_names(["delta"], sol_delta)
+		ret.set_var_names(["omega"], sol_omega)
+		ret.set_var_names(["Tm"], sol_Tm)
 
 		return ret
 	
@@ -302,61 +341,37 @@ class ConstPowerLoad(Projectable):
 
 			s = self.S(n * ret.dt)
 
-			# 1. Handle the degenerate case s = 0
-			if abs(s) < 1e-15:
-				print("Warning: Load power is zero, projecting to zero current.")
-				ret.set_restriction(["current"], np.zeros_like(I0), n=[n])
+			# Precompute constants for the objective function
+			A = np.abs(V0)**2
+			B = np.abs(I0)**2
+			C = 2 * np.real(np.conj(s) * V0 * np.conj(I0))
+			abs_s = np.abs(s)
 
-			# 2. Initial Guess
-			# Starting at V0 is generally robust for this manifold
-			v = V0
-			
-			# Precompute constants
-			s_mag_sq = abs(s)**2
-			s_conj_i0_conj = s.conjugate() * I0.conjugate()
+			# 1D Objective function based on the magnitude r = |i|.
+			# This mirrors the scalar reduction approach in the paper.
+			def objective(r):
+				# W_mag represents the magnitude of the optimally phase-aligned vector
+				W_mag = np.sqrt(B * r**2 + A * (abs_s**2) / r**2 + C)
+				# The simplified distance function
+				return r**2 + (abs_s**2) / r**2 - 2 * W_mag
 
-			delta = np.zeros_like(v)
+			# Find the optimal magnitude r > 0.
+			res = minimize_scalar(objective, bounds=(1e-6, 1e6), method='bounded')
+			r_opt = res.x # type: ignore
 
-			for i in range(self.max_iter):
-				print(f"Iteration {i+1}/{self.max_iter}")
+			# Compute the optimal complex phase alignment vector W
+			W = (np.conj(s) / r_opt) * V0 + r_opt * I0
+			W_mag = np.abs(W)
 
-				v_conj = v.conjugate()
+			# Handle the edge case where W is perfectly zero
+			if W_mag < 1e-12:
+				phase = 1.0 + 0j
+			else:
+				phase = W / W_mag
 
-				h = (v**2 * v_conj**2) - (V0 * v * v_conj**2) - s_mag_sq + (s_conj_i0_conj * v)
-				h_conj = h.conjugate()
-
-				# dh/dv
-				dh_dv = 2*v*(v_conj**2) - V0*(v_conj**2) + s_conj_i0_conj
-				# dh/dv_conj
-				dh_dvc = 2*(v**2)*v_conj - 2*V0*v*v_conj
-				
-				# The Jacobian matrix for the system [h, h_conj]^T
-				# J = [[dh/dv, dh/dv_conj], [dh_conj/dv, dh_conj/dv_conj]]
-				# Note: dh_conj/dv_conj is (dh/dv).conj() and dh_conj/dv is (dh/dv_conj).conj()
-				J = np.array([
-					[dh_dv, dh_dvc],
-					[dh_dvc.conjugate(), dh_dv.conjugate()]
-				])
-
-				# Step calculation: delta = -J^-1 * [h, h_conj]
-				try:
-					delta = np.linalg.solve(J, -np.array([h, h_conj]))
-				except np.linalg.LinAlgError:
-					# Handle singular Jacobian if v hits a critical point
-					# Print with high precision to understand how close we are to the singularity
-					print(f"Warning: Jacobian is singular, stopping iteration with error delta = {delta[0, 0]:.8e}")
-					break
-					
-				v += delta[0]
-
-				# Convergence check
-				print("Delta: ", abs(delta[0]))
-				if abs(delta[0]) < self.tol:
-					break
-
-			# Calculate final I from the constraint VI* = s => I = (s/V)*
-			final_v = v
-			final_i = (s / final_v).conjugate()
+			# Reconstruct the final projected complex values
+			final_i = r_opt * phase
+			final_v = (s / r_opt) * phase
 			
 			ret.set_restriction(["voltage"], final_v, n=[n])
 			ret.set_restriction(["current"], final_i, n=[n])
@@ -372,15 +387,91 @@ class BusBehaviours(Projectable):
 		ret = trajectory.copy()
 		for i, gen in enumerate(self.gens):
 			print(f"Projecting onto generator {i+1}/{len(self.gens)}")
-			t = trajectory.get_subtrajectory(["voltage", "current"], idx=[i])
+			t = trajectory.get_subtrajectory(["voltage", "current", "delta", "omega", "Tm"], idx=[i])
 			projected_t = gen.project(t)
-			ret.set_subtrajectory(["voltage", "current"], projected_t, idx=[i])
+			ret.set_subtrajectory(["voltage", "current", "delta", "omega", "Tm"], projected_t, idx=[i])
 		for i, load in enumerate(self.loads, start=len(self.gens)):
 			print(f"Projecting onto load {i+1}/{len(self.loads)}")
 			t = trajectory.get_subtrajectory(["voltage", "current"], idx=[i])
 			projected_t = load.project(t)
 			ret.set_subtrajectory(["voltage", "current"], projected_t, idx=[i])
 		return ret
+
+class Solvable(ABC):
+	"""
+	An abstract base class representing an optimization problem parameterized by a trajectory, where the solution is a trajectory that satisfies certain constraints.
+
+	Methods
+	-------
+	solve(trajectory: Trajectory) -> Trajectory
+		Solves the optimization problem for the given trajectory.
+	"""
+
+	@abstractmethod
+	def solve(self, t: Trajectory) -> Trajectory:
+		pass
+
+class F(Solvable):
+	"""
+	A class reprsenting the minimization of generation cost subject to operational constraints and linear network behaviour
+	"""
+
+	def __init__(self, Ybus, gen_costs, P_min, P_max, V_max, N, rho=1.0):
+		self.Ybus = Ybus
+		self.gen_costs = gen_costs
+		self.N = N
+		self.rho = rho
+
+		self.V = cp.Variable((Ybus.shape[0], N), complex=True)
+		self.I = cp.Variable((Ybus.shape[0], N), complex=True)
+		self.S = cp.Variable((Ybus.shape[0], N), complex=True)
+		self.Vw = cp.Parameter(self.V.shape, complex=True)
+		self.Iw = cp.Parameter(self.I.shape, complex=True)
+		self.Sw = cp.Parameter(self.S.shape, complex=True)
+
+		# TODO Reevaluate this since it might be wrong
+		# Self.cost = sum over each generator and each timestep of real(S_i)^2 * gen_costs[i]
+		self.cost = cp.sum([cp.quad_over_lin(cp.real(self.S[i, :]), 1/self.gen_costs[i]) for i in range(len(self.gen_costs))])
+		
+		# Self.penalty = rho * ((V-Vw)^H(V-Vw) + (I-Iw)^H(I-Iw) + (S-Sw)^H(S-Sw)), recalling that these are complex numbers
+		self.penalty = self.rho * (cp.sum((self.V - self.Vw).H @ (self.V - self.Vw)) + cp.sum((self.I - self.Iw).H @ (self.I - self.Iw)) + cp.sum((self.S - self.Sw).H @ (self.S - self.Sw)))
+
+		self.constraints = [self.Ybus @ self.V == self.I]
+		self.constraints.append(cp.real(self.S) >= P_min)
+		self.constraints.append(cp.real(self.S) <= P_max)
+		self.constraints.append(cp.abs(self.V) <= V_max)
+
+		# TODO Add line current limits
+
+		self.problem = cp.Problem(cp.Minimize(self.cost + self.penalty), self.constraints)
+		
+
+
+	def solve(self, t: Trajectory) -> Trajectory:
+		self.Vw.value = t.get_var_names(["voltage"])
+		self.Iw.value = t.get_var_names(["current"])
+		self.Sw.value = t.get_var_names(["Tm"])	
+
+		self.problem.solve()
+
+		# Extract solution and return a trajectory
+		ret = t.copy()
+
+		if self.V.value is not None:
+			ret.set_var_names(["voltage"], self.V.value)
+		if self.I.value is not None:
+			ret.set_var_names(["current"], self.I.value)
+		if self.S.value is not None:
+			ret.set_var_names(["Tm"], self.S.value)
+		
+		if self.problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
+			print(f"Optimization failed with status {self.problem.status}")
+
+		return ret
+		
+
+		
+
 
 class Trajectory:
 	"""
@@ -601,6 +692,36 @@ class Trajectory:
 		all_vars = np.vstack(list(self.w.values()))
 		return np.linalg.norm(all_vars)
 
+def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0, threshold=1e-3, max_iterations=100):
+	"""
+	Minimizes a constrained optimization problem using the Alternating Direction Method of Multipliers (ADMM).
+
+	Parameters
+	----------
+	f : Solvable
+		The (possibly constrained) objective function to be minimized.
+	g : Projectable
+		The projection operator representing the constraints.
+	z0 : Trajectory
+		The initial guess for the solution.
+	"""
+
+	# Initialize x0, z0, mu0
+	xs: list[Trajectory] = [z0.copy()]
+	zs: list[Trajectory] = [z0.copy()]
+	us: list[Trajectory] = [z0.copy()]
+
+	for iteration in range(max_iterations-1):
+		xs.append(f.solve(us[-1] - zs[-1]))
+		zs.append(g.project(xs[-1] + us[-1]))
+		us.append(us[-1] + eta(iteration) * (xs[-1] - zs[-1]))
+
+		if (xs[-1] - zs[-1]).norm() < threshold:
+			break
+
+	return xs[-1]
+
+
 def dykstra(sets: list[Projectable], x0: Trajectory, threshold=1e-6, max_iterations=1000) -> Trajectory:
 	increments = []
 	for _ in sets:
@@ -798,10 +919,13 @@ def test_dynamics():
 	Bi = BusBehaviours([g1, g2], [l1])
 	Bnet = Network(3, Ybus)
 
-	initial_traj = Trajectory(5.0, 0.01, {"voltage": 3, "current": 3})
+	initial_traj = Trajectory(2.5, 0.01, {"voltage": 3, "current": 3, "delta": 2, "omega": 2, "Tm": 2})
 	# Initialize with constant values for each 
 	initial_traj.set_constant(["voltage"], [V10_complex, V20_complex, V30_complex])
 	initial_traj.set_constant(["current"], [I10, I20, I30])
+	initial_traj.set_constant(["delta"], [delta10, delta20])
+	initial_traj.set_constant(["omega"], [omega10, omega20])
+	initial_traj.set_constant(["Tm"], [PC1, PC2])
 
 	print("Initial Trajectory:")
 	print("Voltages:")
@@ -817,15 +941,15 @@ def test_dynamics():
 	print("ae(x)")
 	print(g1.ae(np.array([0, omega10, PC1, V10_complex.real, V10_complex.imag, I10.real, I10.imag])))
 
-	projected_traj = dykstra([Bi, Bnet], initial_traj)
+	projected_traj = dykstra([Bi, Bnet], initial_traj, threshold=1e-3, max_iterations=5)
 
 	# Plotting results
 	time_points = np.arange(0, projected_traj.T, projected_traj.dt)
 	plt.figure(figsize=(12, 8))
 	plt.subplot(2, 1, 1)
-	plt.plot(time_points, projected_traj.w['voltage'][0, :].real, label='Voltage at Bus 1')
-	plt.plot(time_points, projected_traj.w['voltage'][1, :].real, label='Voltage at Bus 2')
-	plt.plot(time_points, projected_traj.w['voltage'][2, :].real, label='Voltage at Bus 3')
+	plt.plot(time_points, np.abs(projected_traj.w['voltage'][0, :]), label='Voltage Magnitude at Bus 1')
+	plt.plot(time_points, np.abs(projected_traj.w['voltage'][1, :]), label='Voltage Magnitude at Bus 2')
+	plt.plot(time_points, np.abs(projected_traj.w['voltage'][2, :]), label='Voltage Magnitude at Bus 3')
 	plt.title('Voltage Trajectories')
 	plt.xlabel('Time (s)')
 	plt.ylabel('Voltage Magnitude')
@@ -833,15 +957,14 @@ def test_dynamics():
 	plt.grid()
 
 	plt.subplot(2, 1, 2)
-	plt.plot(time_points, projected_traj.w['current'][0, :].real, label='Current at Bus 1')
-	plt.plot(time_points, projected_traj.w['current'][1, :].real, label='Current at Bus 2')
-	plt.plot(time_points, projected_traj.w['current'][2, :].real, label='Current at Bus 3')
-	plt.title('Current Trajectories')
+	plt.plot(time_points, np.angle(projected_traj.w['voltage'][0, :]), label='Voltage Angle at Bus 1')
+	plt.plot(time_points, np.angle(projected_traj.w['voltage'][1, :]), label='Voltage Angle at Bus 2')
+	plt.plot(time_points, np.angle(projected_traj.w['voltage'][2, :]), label='Voltage Angle at Bus 3')
+	plt.title('Voltage Angles')
 	plt.xlabel('Time (s)')
-	plt.ylabel('Current Magnitude')
+	plt.ylabel('Voltage Angle (radians)')
 	plt.legend()
 	plt.grid()
-
 	plt.tight_layout()
 	plt.show()
 
