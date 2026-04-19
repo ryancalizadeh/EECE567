@@ -336,8 +336,8 @@ class ConstPowerLoad(Projectable):
 	def project(self, trajectory: Trajectory) -> Trajectory:
 		ret = trajectory.copy()
 		for n in range(ret.N):
-			V0 = ret.get_restriction(["voltage"], n=[n])
-			I0 = ret.get_restriction(["current"], n=[n])
+			V0 = ret.w["voltage"][:, [n]]
+			I0 = ret.w["current"][:, [n]]
 
 			s = self.S(n * ret.dt)
 
@@ -372,9 +372,10 @@ class ConstPowerLoad(Projectable):
 			# Reconstruct the final projected complex values
 			final_i = r_opt * phase
 			final_v = (s / r_opt) * phase
-			
-			ret.set_restriction(["voltage"], final_v, n=[n])
-			ret.set_restriction(["current"], final_i, n=[n])
+
+			ret.w["voltage"][:, n] = final_v.ravel()
+			ret.w["current"][:, n] = final_i.ravel()
+			ret.w["power"][:, n] = s
 
 		return ret
 
@@ -387,14 +388,22 @@ class BusBehaviours(Projectable):
 		ret = trajectory.copy()
 		for i, gen in enumerate(self.gens):
 			print(f"Projecting onto generator {i+1}/{len(self.gens)}")
-			t = trajectory.get_subtrajectory(["voltage", "current", "delta", "omega", "Tm"], idx=[i])
+			gen_vars = ["voltage", "current", "delta", "omega", "Tm"]
+			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in gen_vars})
+			for v in gen_vars:
+				t.w[v] = trajectory.w[v][[i], :]
 			projected_t = gen.project(t)
-			ret.set_subtrajectory(["voltage", "current", "delta", "omega", "Tm"], projected_t, idx=[i])
+			for v in gen_vars:
+				ret.w[v][[i], :] = projected_t.w[v]
 		for i, load in enumerate(self.loads, start=len(self.gens)):
 			print(f"Projecting onto load {i+1}/{len(self.loads)}")
-			t = trajectory.get_subtrajectory(["voltage", "current"], idx=[i])
+			load_vars = ["voltage", "current"]
+			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in load_vars})
+			for v in load_vars:
+				t.w[v] = trajectory.w[v][[i], :]
 			projected_t = load.project(t)
-			ret.set_subtrajectory(["voltage", "current"], projected_t, idx=[i])
+			for v in load_vars:
+				ret.w[v][[i], :] = projected_t.w[v]
 		return ret
 
 class Solvable(ABC):
@@ -422,19 +431,24 @@ class F(Solvable):
 		self.N = N
 		self.rho = rho
 
+		self.g = len(gen_costs)
+
 		self.V = cp.Variable((Ybus.shape[0], N), complex=True)
 		self.I = cp.Variable((Ybus.shape[0], N), complex=True)
-		self.S = cp.Variable((Ybus.shape[0], N), complex=True)
+		self.S = cp.Variable((self.g, N), complex=True)
 		self.Vw = cp.Parameter(self.V.shape, complex=True)
 		self.Iw = cp.Parameter(self.I.shape, complex=True)
 		self.Sw = cp.Parameter(self.S.shape, complex=True)
 
+		self.x = cp.vstack([self.V, self.I, self.S])
+		self.w = cp.vstack([self.Vw, self.Iw, self.Sw])
+
 		# TODO Reevaluate this since it might be wrong
 		# Self.cost = sum over each generator and each timestep of real(S_i)^2 * gen_costs[i]
-		self.cost = cp.sum([cp.quad_over_lin(cp.real(self.S[i, :]), 1/self.gen_costs[i]) for i in range(len(self.gen_costs))])
+		self.cost = cp.sum([cp.quad_over_lin(cp.real(self.S[i, :]), 1/self.gen_costs[i]) for i in range(self.g)])
 		
-		# Self.penalty = rho * ((V-Vw)^H(V-Vw) + (I-Iw)^H(I-Iw) + (S-Sw)^H(S-Sw)), recalling that these are complex numbers
-		self.penalty = self.rho * (cp.sum((self.V - self.Vw).H @ (self.V - self.Vw)) + cp.sum((self.I - self.Iw).H @ (self.I - self.Iw)) + cp.sum((self.S - self.Sw).H @ (self.S - self.Sw)))
+		# Self.penalty = rho * ||x-w||_2^2, recalling that these are complex numbers
+		self.penalty = self.rho * cp.sum_squares(self.x - self.w)
 
 		self.constraints = [self.Ybus @ self.V == self.I]
 		self.constraints.append(cp.real(self.S) >= P_min)
@@ -450,7 +464,7 @@ class F(Solvable):
 	def solve(self, t: Trajectory) -> Trajectory:
 		self.Vw.value = t.get_var_names(["voltage"])
 		self.Iw.value = t.get_var_names(["current"])
-		self.Sw.value = t.get_var_names(["Tm"])	
+		self.Sw.value = t.get_var_names(["power"])	
 
 		self.problem.solve()
 
@@ -468,9 +482,6 @@ class F(Solvable):
 			print(f"Optimization failed with status {self.problem.status}")
 
 		return ret
-		
-
-		
 
 
 class Trajectory:
@@ -539,95 +550,6 @@ class Trajectory:
 				self.w[var_name] = values[start_row:start_row+size, :]
 			else:
 				self.w[var_name][idx, :] = values[start_row:start_row+size, :]
-			start_row += size
-
-	def get_subtrajectory(self, var_names: list[str], idx=None) -> Trajectory:
-		"""
-		Returns a new Trajectory object containing only the specified variables and indices.
-		
-		Parameters
-		----------
-		var_name : list[str]
-			The names of the variables to extract.
-		idx : list[int], optional
-			The indices of the rows to extract. If None, extracts all rows.
-		"""
-
-		sub_vars = {var_name: self.vars[var_name] if idx is None else len(idx) for var_name in var_names}
-		sub_traj = Trajectory(self.T, self.dt, sub_vars)
-		for var_name in var_names:
-			if idx is None:
-				sub_traj.w[var_name] = self.w[var_name]
-			else:
-				sub_traj.w[var_name] = self.w[var_name][idx, :]
-		return sub_traj
-	
-	def set_subtrajectory(self, var_names: list[str], sub_traj: Trajectory, idx=None) -> None:
-		"""
-		Sets the specified variables and indices in the current trajectory to the values from the given sub-trajectory.
-		
-		Parameters
-		----------
-		var_name : list[str]
-			The names of the variables to set.
-		sub_traj : Trajectory
-			The trajectory containing the values to set.
-		idx : list[int], optional
-			The indices of the rows to set. If None, sets all rows.
-		"""
-
-		for var_name in var_names:
-			if idx is None:
-				self.w[var_name] = sub_traj.w[var_name]
-			else:
-				self.w[var_name][idx, :] = sub_traj.w[var_name]
-
-	def get_restriction(self, var_names: list[str], n: list[int], idx=None) -> np.ndarray:
-		"""
-		Returns the values of the specified variables at the given time-step indices and indices.
-		
-		Parameters
-		----------
-		var_name : list[str]
-			The names of the variables to extract.
-		n : list[int]
-			The time-step indices at which to extract the values.
-		idx : list[int], optional
-			The indices of the rows to extract. If None, extracts all rows.
-		"""
-
-		time_indices = n
-		sub_trajectories = []
-		for var_name in var_names:
-			if idx is None:
-				sub_trajectories.append(self.w[var_name][:, time_indices])
-			else:
-				sub_trajectories.append(self.w[var_name][idx, :][:, time_indices])
-		return np.vstack(sub_trajectories)
-
-	def set_restriction(self, var_names: list[str], values: np.ndarray, n: list[int], idx=None) -> None:
-		"""
-		Sets the values of the specified variables at the given time-step indices and indices.
-
-		Parameters
-		----------
-		var_name : list[str]
-			The names of the variables to set.
-		values : np.ndarray
-			The values to set for the specified variables.
-		n : list[int]
-			The time-step indices at which to set the values.
-		idx : list[int], optional
-			The indices of the rows to set. If None, sets all rows.
-		"""
-		time_indices = n
-		start_row = 0
-		for var_name in var_names:
-			size = self.vars[var_name] if idx is None else len(idx)
-			if idx is None:
-				self.w[var_name][:, time_indices] = values[start_row:start_row+size, :]
-			else:
-				self.w[var_name][idx, :][:, time_indices] = values[start_row:start_row+size, :]
 			start_row += size
 
 	def set_constant(self, var_names: list[str], value, idx=None) -> None:
@@ -720,106 +642,6 @@ def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0,
 			break
 
 	return xs[-1]
-
-
-def dykstra(sets: list[Projectable], x0: Trajectory, threshold=1e-6, max_iterations=1000) -> Trajectory:
-	increments = []
-	for _ in sets:
-		increments.append(Trajectory(x0.T, x0.dt, x0.vars))
-
-	current_x = x0
-	
-	for iteration in range(max_iterations):
-		x_start_of_cycle = current_x
-
-		for i, p_set in enumerate(sets):
-			print(f"Projecting onto set {i+1}/{len(sets)}")
-
-			# 1. Add the increment to the current point
-			w = current_x + increments[i]
-
-			# 2. Project onto the current set
-			projected_x = p_set.project(w)
-
-			# 3. Update the increment for this specific set
-			increments[i] = w - projected_x
-
-			# 4. Update the current state
-			current_x = projected_x
-
-		# 5. Check for convergence
-		diff = current_x - x_start_of_cycle
-
-		print(f"Iteration {iteration + 1}: Norm of difference = {diff.norm()}")
-		
-		if diff.norm() < threshold:
-			break
-
-	return current_x
-
-# Testing
-def test_dykstra():
-	class Circle(Projectable):
-		def __init__(self, radius):
-			self.radius = radius
-
-		def project(self, trajectory: Trajectory) -> Trajectory:
-			# Simple projection onto a circle of given radius
-			norm = trajectory.norm()
-			if norm > self.radius:
-				projected_traj = Trajectory(trajectory.T, trajectory.dt, trajectory.vars)
-				for var_name in trajectory.vars:
-					projected_traj.w[var_name] = (trajectory.w[var_name] / norm) * self.radius
-				return projected_traj
-			else:
-				return trajectory.copy()
-
-	class Box(Projectable):
-		def __init__(self, lower_bound, upper_bound):
-			self.lower_bound = lower_bound
-			self.upper_bound = upper_bound
-
-		def project(self, trajectory: Trajectory) -> Trajectory:
-			# Simple projection onto a box defined by lower and upper bounds
-			projected_traj = Trajectory(trajectory.T, trajectory.dt, trajectory.vars)
-			for var_name in trajectory.vars:
-				projected_traj.w[var_name] = np.clip(trajectory.w[var_name], self.lower_bound, self.upper_bound)
-			return projected_traj
-
-	a = -0.5
-	b = 1.0
-	b1 = Box(a, b)
-	c1 = Circle(1)
-
-	sets = [b1, c1]
-	x0 = Trajectory(1.0, 1.0, {"var1": 1, "var2": 1})
-	x0.w['var1'] = np.array([[-1.0]], dtype=np.complex64)
-	x0.w['var2'] = np.array([[1.0]], dtype=np.complex64)
-
-	result = dykstra(sets, x0)
-
-	import matplotlib.patches as patches
-
-	# Visualization
-	# Plot the trajectory and the sets for visualization
-	fig, axs = plt.subplots(1, 1, figsize=(8, 8))
-	axs.set_title("Dykstra's Algorithm Projection")
-	axs.set_xlim(-2, 2)
-	axs.set_ylim(-2, 2)
-	# Plot the box
-	box = patches.Rectangle((a, a), b - a, b - a, fill=False,
-						edgecolor='blue', label='Box')
-	axs.add_patch(box)
-	# Plot the circle
-	circle = patches.Circle((0, 0), 1, fill=False,
-						edgecolor='red', label='Circle')
-	axs.add_patch(circle)
-	# Plot the trajectory
-	axs.plot(result.w['var1'][0, 0].real, result.w['var2'][0, 0].real, 'go', label='Projected Trajectory')
-	axs.plot(x0.w['var1'][0, 0].real, x0.w['var2'][0, 0].real, 'ro', label='Initial Trajectory')
-	axs.legend()
-	plt.grid()
-	plt.show()
 
 def test_network():
 	n = 3
@@ -978,6 +800,56 @@ def test_const_load_projection():
 	print("Projected Current:", projected_traj.w['current'])
 	print("Power at each time step:", projected_traj.w['voltage'] * projected_traj.w['current'].conjugate())
 
+def test_get_set_var_names():
+	traj = Trajectory(0.03, 0.01, {"voltage": 2, "current": 1})
+	data = np.array([[1+1j, 2+2j, 3+3j], [4+4j, 5+5j, 6+6j]], dtype=np.complex64)
+	traj.set_var_names(["voltage"], data)
+	assert np.allclose(traj.get_var_names(["voltage"]), data)
+	row = np.array([[10+0j, 10+0j, 10+0j]], dtype=np.complex64)
+	traj.set_var_names(["voltage"], row, idx=[0])
+	assert np.allclose(traj.get_var_names(["voltage"], idx=[0]), row)
+	i_data = np.array([[7+0j, 8+0j, 9+0j]], dtype=np.complex64)
+	traj.set_var_names(["current"], i_data)
+	combined = traj.get_var_names(["voltage", "current"])
+	assert combined.shape == (3, 3)
+	assert np.allclose(combined[2:3, :], i_data)
+	print("test_get_set_var_names PASSED")
+
+def test_network_refactored():
+	n = 3
+	Ybus = np.array([[2-2j, -1+1j, -1+1j],
+	                 [-1+1j, 2-2j, -1+1j],
+	                 [-1+1j, -1+1j, 2-2j]], dtype=np.complex64)
+	network = Network(n, Ybus)
+	traj = Trajectory(0.1, 0.05, {"voltage": 3, "current": 3})
+	traj.w['voltage'] = np.array([[1.0+1.0j, 1.02+0.8j],
+	                               [0.98+0.9j, 1.0+1.0j],
+	                               [1.01+1.1j, 0.99+0.95j]], dtype=np.complex64)
+	traj.w['current'] = np.array([[0.0+0.1j, 0.5+0.2j],
+	                               [0.3+0.2j, 0.1+0.4j],
+	                               [0.2+0.3j, 0.4+0.1j]], dtype=np.complex64)
+	projected = network.project(traj)
+	residual = np.linalg.norm(Ybus @ projected.w['voltage'] - projected.w['current'])
+	assert residual < 1e-4, f"KCL residual too large: {residual}"
+	print(f"test_network_refactored PASSED (residual={residual:.2e})")
+
+def test_const_load_projection_refactored():
+	S = 2.1 + 0.5j
+	load = ConstPowerLoad(lambda t: S)
+	traj = Trajectory(0.03, 0.01, {"voltage": 1, "current": 1, "power": 1})
+	traj.set_constant(["voltage"], [1.5 + 1j])
+	traj.set_constant(["current"], [2.2 - 0.3j])
+	traj.set_constant(["power"], [0.0 + 0j])
+	projected = load.project(traj)
+	computed_power = projected.w['voltage'] * projected.w['current'].conjugate()
+	for k in range(traj.N):
+		assert abs(computed_power[0, k] - S) < 1e-4, \
+			f"Power constraint violated at t={k}: {computed_power[0,k]} != {S}"
+	print("test_const_load_projection_refactored PASSED")
+
 # test_const_load_projection()
-test_dynamics()
+# test_dynamics()
 # test_dykstra()
+test_get_set_var_names()
+test_network_refactored()
+test_const_load_projection_refactored()
