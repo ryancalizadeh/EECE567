@@ -21,52 +21,6 @@ class Projectable(ABC):
 	def project(self, trajectory: Trajectory) -> Trajectory:
 		pass
 
-class Network(Projectable):
-	"""
-	A class representing a network with a given number of nodes and Ybus matrix.
-
-	Parameters
-	----------
-	n : int
-		Number of nodes in the network.
-	Ybus : numpy.ndarray
-		The admittance matrix of the network.
-	"""
-
-	def __init__(self, n, Ybus):
-		self.n = n
-		self.Ybus = Ybus
-
-		self.gram_matrix_inv = np.linalg.inv(Ybus @ Ybus.conj().T + np.eye(n))
-
-		A = np.eye(n) - Ybus.conj().T @ self.gram_matrix_inv @ Ybus
-		B = Ybus.conj().T @ self.gram_matrix_inv
-		C = self.gram_matrix_inv @ Ybus
-		D = np.eye(n) - self.gram_matrix_inv
-		self.projector = np.block([[A, B], [C, D]])
-
-	def project(self, trajectory: Trajectory) -> Trajectory:
-		"""
-		Projects the given trajectory onto the network
-
-		Parameters
-		----------
-		trajectory : Trajectory
-			The trajectory to project.
-
-		Returns
-		-------
-		Trajectory
-			The projected trajectory.
-		"""
-		
-		ret = trajectory.copy()
-		VI = ret.get_var_names(["voltage", "current"])
-		projected_VI = self.projector @ VI
-		ret.set_var_names(["voltage", "current"], projected_VI)
-
-		return ret
-
 class Generator(Projectable):
 	"""
 	A class implementing projections onto a single classical generator + fast governor behaviour
@@ -109,8 +63,8 @@ class Generator(Projectable):
 		N = trajectory.N
 		dt = trajectory.dt
 
-		# Total number of variables: delta, omega, Tm, V_re, V_im, I_re, I_im
-		n_vars = 7
+		# Total number of variables: delta, omega, Tm, V_re, V_im, I_re, I_im, P, Q
+		n_vars = 9
 
 		# Extract measurement data
 		V_traj = trajectory.get_var_names(["voltage"])
@@ -118,6 +72,7 @@ class Generator(Projectable):
 		delta_traj = trajectory.get_var_names(["delta"])
 		omega_traj = trajectory.get_var_names(["omega"])
 		Tm_traj = trajectory.get_var_names(["Tm"])
+		S_traj = trajectory.get_var_names(["power"])
 
 		V_traj_re = np.real(V_traj)
 		V_traj_im = np.imag(V_traj)
@@ -126,7 +81,8 @@ class Generator(Projectable):
 		delta_traj = np.real(delta_traj)
 		omega_traj = np.real(omega_traj)
 		Tm_traj = np.real(Tm_traj)
-
+		P_traj = np.real(S_traj)
+		Q_traj = np.imag(S_traj)
 
 		# Create optimization variables (as 2D matrix for easier indexing)
 		x_matrix = ca.MX.sym('x', (n_vars, N))  # type: ignore
@@ -140,6 +96,8 @@ class Generator(Projectable):
 		V_im = x_matrix[4, :]
 		I_re = x_matrix[5, :]
 		I_im = x_matrix[6, :]
+		P = x_matrix[7, :]
+		Q = x_matrix[8, :]
 
 		# Build constraints vector
 		constraints_list = []
@@ -148,6 +106,12 @@ class Generator(Projectable):
 		constraints_list.append(delta[0])
 		constraints_list.append(omega[0] - self.ws)
 		constraints_list.append(Tm[0] - self.Pc)
+		constraints_list.append(V_re[0] - V_traj_re[0, 0])
+		constraints_list.append(V_im[0] - V_traj_im[0, 0])
+		constraints_list.append(I_re[0] - I_traj_re[0, 0])
+		constraints_list.append(I_im[0] - I_traj_im[0, 0])
+		constraints_list.append(P[0] - P_traj[0, 0])
+		constraints_list.append(Q[0] - Q_traj[0, 0])
 
 		# # Add temporary constraint to fix variables for the first 0.5 seconds
 		# for k in range(min(int(0.5/dt), N)):
@@ -193,6 +157,13 @@ class Generator(Projectable):
 			alg_im = E_k_im - self.Zd.real * I_im[k] - self.Zd.imag * I_re[k] - V_im[k]
 			constraints_list.append(alg_re)
 			constraints_list.append(alg_im)
+
+			# Add electrical power constraints
+			P_k = V_re[k] * I_re[k] + V_im[k] * I_im[k]
+			Q_k = V_im[k] * I_re[k] - V_re[k] * I_im[k]
+
+			constraints_list.append(P[k] - P_k)
+			constraints_list.append(Q[k] - Q_k)
 		
 		constraints_vec = ca.vertcat(*constraints_list)
 
@@ -200,7 +171,8 @@ class Generator(Projectable):
 		ubg = np.zeros(constraints_vec.shape[0])
 
 		# Objective function: minimize ||w - trajectory||_2^2
-		obj = ca.sumsqr(V_re - V_traj_re) + ca.sumsqr(V_im - V_traj_im) + ca.sumsqr(I_re - I_traj_re) + ca.sumsqr(I_im - I_traj_im) + ca.sumsqr(omega - omega_traj) + ca.sumsqr(Tm - Tm_traj) + ca.sumsqr(delta - delta_traj)
+		obj = ca.sumsqr(V_re - V_traj_re) + ca.sumsqr(V_im - V_traj_im) + ca.sumsqr(I_re - I_traj_re) + ca.sumsqr(I_im - I_traj_im) + ca.sumsqr(omega - omega_traj) + ca.sumsqr(Tm - Tm_traj) + ca.sumsqr(delta - delta_traj) + ca.sumsqr(P - P_traj) + ca.sumsqr(Q - Q_traj)
+
 
 		opts = {
 			'ipopt.print_level': 5, # 0 for silent, 5 for detailed output
@@ -226,8 +198,10 @@ class Generator(Projectable):
 		V_im_guess = V_traj_im.flatten()
 		I_re_guess = I_traj_re.flatten()
 		I_im_guess = I_traj_im.flatten()
+		P_guess = P_traj.flatten()
+		Q_guess = Q_traj.flatten()
 		
-		x_init = np.column_stack([delta_guess, omega_guess, Tm_guess, V_re_guess, V_im_guess, I_re_guess, I_im_guess])
+		x_init = np.column_stack([delta_guess, omega_guess, Tm_guess, V_re_guess, V_im_guess, I_re_guess, I_im_guess, P_guess, Q_guess])
 		initial_guess = x_init.flatten()
 
 		lbx = np.full((N, n_vars), -np.inf)
@@ -252,6 +226,9 @@ class Generator(Projectable):
 		sol_I_im = sol_x[6, :]
 		sol_V = (sol_V_re + 1j*sol_V_im).reshape(1, -1)
 		sol_I = (sol_I_re + 1j*sol_I_im).reshape(1, -1)
+		sol_P = sol_x[7, :].reshape(1, -1)
+		sol_Q = sol_x[8, :].reshape(1, -1)
+		sol_S = (sol_P + 1j * sol_Q)
 
 		# # Plot omega
 		# fig, axs = plt.subplots(1, 1, figsize=(10, 5))
@@ -281,6 +258,7 @@ class Generator(Projectable):
 		ret.set_var_names(["delta"], sol_delta)
 		ret.set_var_names(["omega"], sol_omega)
 		ret.set_var_names(["Tm"], sol_Tm)
+		ret.set_var_names(["power"], sol_S)
 
 		return ret
 	
@@ -342,9 +320,9 @@ class ConstPowerLoad(Projectable):
 			s = self.S(n * ret.dt)
 
 			# Precompute constants for the objective function
-			A = np.abs(V0)**2
-			B = np.abs(I0)**2
-			C = 2 * np.real(np.conj(s) * V0 * np.conj(I0))
+			A = (np.abs(V0)**2).item()
+			B = (np.abs(I0)**2).item()
+			C = (2 * np.real(np.conj(s) * V0 * np.conj(I0))).item()
 			abs_s = np.abs(s)
 
 			# 1D Objective function based on the magnitude r = |i|.
@@ -364,7 +342,7 @@ class ConstPowerLoad(Projectable):
 			W_mag = np.abs(W)
 
 			# Handle the edge case where W is perfectly zero
-			if W_mag < 1e-12:
+			if W_mag.item() < 1e-12:
 				phase = 1.0 + 0j
 			else:
 				phase = W / W_mag
@@ -388,7 +366,7 @@ class BusBehaviours(Projectable):
 		ret = trajectory.copy()
 		for i, gen in enumerate(self.gens):
 			print(f"Projecting onto generator {i+1}/{len(self.gens)}")
-			gen_vars = ["voltage", "current", "delta", "omega", "Tm"]
+			gen_vars = ["voltage", "current", "delta", "omega", "Tm", "power"]
 			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in gen_vars})
 			for v in gen_vars:
 				t.w[v] = trajectory.w[v][[i], :]
@@ -397,7 +375,7 @@ class BusBehaviours(Projectable):
 				ret.w[v][[i], :] = projected_t.w[v]
 		for i, load in enumerate(self.loads, start=len(self.gens)):
 			print(f"Projecting onto load {i+1}/{len(self.loads)}")
-			load_vars = ["voltage", "current"]
+			load_vars = ["voltage", "current", "power"]
 			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in load_vars})
 			for v in load_vars:
 				t.w[v] = trajectory.w[v][[i], :]
@@ -420,22 +398,28 @@ class Solvable(ABC):
 	def solve(self, t: Trajectory) -> Trajectory:
 		pass
 
-class F(Solvable):
+class Objective(Solvable):
 	"""
 	A class reprsenting the minimization of generation cost subject to operational constraints and linear network behaviour
 	"""
 
-	def __init__(self, Ybus, gen_costs, P_min, P_max, V_max, N, rho=1.0):
+	def __init__(self, Ybus, gen_costs, P_min, P_max, V_max, t: Trajectory, rho=1.0):
 		self.Ybus = Ybus
 		self.gen_costs = gen_costs
-		self.N = N
+		self.N = t.N
+		self.g = len(gen_costs)
+		self.num_buses = Ybus.shape[0]
+
 		self.rho = rho
 
-		self.g = len(gen_costs)
+		P_min = np.array(P_min).reshape(-1, 1)
+		P_max = np.array(P_max).reshape(-1, 1)
+		V_max = np.array(V_max).reshape(-1, 1)
 
-		self.V = cp.Variable((Ybus.shape[0], N), complex=True)
-		self.I = cp.Variable((Ybus.shape[0], N), complex=True)
-		self.S = cp.Variable((self.g, N), complex=True)
+
+		self.V = cp.Variable((Ybus.shape[0], self.N), complex=True)
+		self.I = cp.Variable((Ybus.shape[0], self.N), complex=True)
+		self.S = cp.Variable((self.g, self.N), complex=True)
 		self.Vw = cp.Parameter(self.V.shape, complex=True)
 		self.Iw = cp.Parameter(self.I.shape, complex=True)
 		self.Sw = cp.Parameter(self.S.shape, complex=True)
@@ -446,7 +430,7 @@ class F(Solvable):
 		# TODO Reevaluate this since it might be wrong
 		# Self.cost = sum over each generator and each timestep of real(S_i)^2 * gen_costs[i]
 		self.cost = cp.sum([cp.quad_over_lin(cp.real(self.S[i, :]), 1/self.gen_costs[i]) for i in range(self.g)])
-		
+
 		# Self.penalty = rho * ||x-w||_2^2, recalling that these are complex numbers
 		self.penalty = self.rho * cp.sum_squares(self.x - self.w)
 
@@ -464,7 +448,7 @@ class F(Solvable):
 	def solve(self, t: Trajectory) -> Trajectory:
 		self.Vw.value = t.get_var_names(["voltage"])
 		self.Iw.value = t.get_var_names(["current"])
-		self.Sw.value = t.get_var_names(["power"])	
+		self.Sw.value = t.get_var_names(["power"])[:self.g, :]
 
 		self.problem.solve()
 
@@ -476,7 +460,7 @@ class F(Solvable):
 		if self.I.value is not None:
 			ret.set_var_names(["current"], self.I.value)
 		if self.S.value is not None:
-			ret.set_var_names(["Tm"], self.S.value)
+			ret.w["power"][:self.g, :] = self.S.value
 		
 		if self.problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
 			print(f"Optimization failed with status {self.problem.status}")
@@ -596,6 +580,15 @@ class Trajectory:
 			result.w[var_name] = self.w[var_name] - other.w[var_name]
 		return result
 	
+	def __mul__(self, scalar):
+		result = Trajectory(self.T, self.dt, self.vars)
+		for var_name in self.vars:
+			result.w[var_name] = self.w[var_name] * scalar
+		return result
+
+	def __rmul__(self, scalar):
+		return self.__mul__(scalar)
+
 	def copy(self):
 		"""
 		Returns a deep copy of the trajectory.
@@ -614,7 +607,7 @@ class Trajectory:
 		all_vars = np.vstack(list(self.w.values()))
 		return np.linalg.norm(all_vars)
 
-def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0, threshold=1e-3, max_iterations=100):
+def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0, threshold=1e-3, max_iterations=100, callback=None):
 	"""
 	Minimizes a constrained optimization problem using the Alternating Direction Method of Multipliers (ADMM).
 
@@ -626,173 +619,31 @@ def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0,
 		The projection operator representing the constraints.
 	z0 : Trajectory
 		The initial guess for the solution.
+	callback : callable, optional
+		Called as callback(iteration, x, z, u) at the end of each iteration.
 	"""
 
 	# Initialize x0, z0, mu0
-	xs: list[Trajectory] = [z0.copy()]
 	zs: list[Trajectory] = [z0.copy()]
-	us: list[Trajectory] = [z0.copy()]
+	xs: list[Trajectory] = [Trajectory(z0.T, z0.dt, z0.vars)]
+	us: list[Trajectory] = [Trajectory(z0.T, z0.dt, z0.vars)]
 
 	for iteration in range(max_iterations-1):
-		xs.append(f.solve(us[-1] - zs[-1]))
+		xs.append(f.solve(zs[-1] - us[-1]))
 		zs.append(g.project(xs[-1] + us[-1]))
 		us.append(us[-1] + eta(iteration) * (xs[-1] - zs[-1]))
+
+		if callback is not None:
+			callback(iteration, xs[-1], zs[-1], us[-1])
 
 		if (xs[-1] - zs[-1]).norm() < threshold:
 			break
 
 	return xs[-1]
 
-def test_network():
-	n = 3
-	Ybus = np.array([[6, -1, -5],
-				  [-1, 7, -6],
-				  [-5, -6, 11]], dtype=np.complex64)
-	network = Network(n, Ybus)
-
-	vars = {
-		"voltage": n,
-		"current": n
-	}
-	traj = Trajectory(0.1, 0.05, vars)
-	traj.w['voltage'] = np.array([[1.0 + 1.0j, 1.02 + 0.8j], [1.0 + 0.5j, 1.2 + 0.6j], [1.0 + 0.3j, 1.2 + 0.4j]], dtype=np.complex64)
-	traj.w['current'] = np.array([[0.0 + 0.1j, 0.5 + 0.2j], [0.0 + 0.15j, 0.4 + 0.25j], [0.0 + 0.2j, 0.3 + 0.1j]], dtype=np.complex64)
-
-	projected_traj = network.project(traj)
-
-	print("Projected Voltages:")
-	print(projected_traj.w['voltage'])
-	print("Projected Currents:")
-	print(projected_traj.w['current'])
-
-	print("Residual:")
-	print(np.linalg.norm(Ybus @ projected_traj.w['voltage'] - projected_traj.w['current']))
-
-def test_dynamics():
-	omega_s = 2*np.pi*60
-	H1 = 8
-	D1 = 0
-	RD1 = 0.04
-	X1_p = 0.0608
-	H2 = 3.01
-	D2 = 0
-	RD2 = 0.04
-	X2_p = 0.1813
-
-	Tsv1 = 2
-	Tsv2 = 2
-
-	R12 = 0.01
-	R23 = 0.02
-	R13 = 0.01
-	X12 = 0.085
-	X23 = 0.161
-	X13 = 0.092
-	ysh12 = 0.088j
-	ysh23 = 0.153j
-	ysh13 = 0.079j
-
-	V10 = 1.04
-	theta10 = 0.0
-	V20 = 1.025
-	theta20 = -0.148 * np.pi / 180
-	V30 = 0.994
-	theta30 = -7.65 * np.pi / 180
-
-	V10_complex = V10 * np.exp(1j * theta10)
-	V20_complex = V20 * np.exp(1j * theta20)
-	V30_complex = V30 * np.exp(1j * theta30)
-
-	S10 = 1.597 + 0.452j
-	S20 = 0.791 - 0.279j
-	S30 = -2.35 - 0.5j
-	PC1 = np.real(S10)
-	PC2 = np.real(S20)
-	I10 = np.conj(S10 / (V10 * np.exp(1j * theta10)))
-	I20 = np.conj(S20 / (V20 * np.exp(1j * theta20)))
-	I30 = np.conj(S30 / (V30 * np.exp(1j * theta30)))
-	E1 = V10 * np.exp(1j * theta10) + 1j*X1_p * I10
-	E2 = V20 * np.exp(1j * theta20) + 1j*X2_p * I20
-	E10 = np.abs(E1)
-	E20 = np.abs(E2)
-
-	delta10 = np.angle(E1)
-	delta20 = np.angle(E2)
-
-	omega10 = omega_s
-	omega20 = omega_s
-	Ybus = np.array([
-	[1/(R12 + 1j*X12) + 1/(R13 + 1j*X13) + ysh12 + ysh13, -1/(R12 + 1j*X12), -1/(R13 + 1j*X13)],
-	[-1/(R12 + 1j*X12), 1/(R12 + 1j*X12) + 1/(R23 + 1j*X23) + ysh12 + ysh23, -1/(R23 + 1j*X23)],
-	[-1/(R13 + 1j*X13), -1/(R23 + 1j*X23), 1/(R13 + 1j*X13) + 1/(R23 + 1j*X23) + ysh13 + ysh23]
-	], dtype=complex)
-
-	P_init = np.real(S30)
-	Q_init = np.imag(S30)
-	P_post = -2.45
-	Q_post = Q_init
-
-	print(E10, X1_p, H1, D1, Tsv1, RD1, delta10, PC1)
-
-	g1 = Generator(E10, 1j*X1_p, H1, D1, Tsv1, RD1, delta10, PC1)
-	g2 = Generator(E20, 1j*X2_p, H2, D2, Tsv2, RD2, delta20, PC2)
-	l1 = ConstPowerLoad(lambda t: P_init + 1j*Q_init if t < 0.5 else P_post + 1j*Q_post)
-
-	Bi = BusBehaviours([g1, g2], [l1])
-	Bnet = Network(3, Ybus)
-
-	initial_traj = Trajectory(2.5, 0.01, {"voltage": 3, "current": 3, "delta": 2, "omega": 2, "Tm": 2})
-	# Initialize with constant values for each 
-	initial_traj.set_constant(["voltage"], [V10_complex, V20_complex, V30_complex])
-	initial_traj.set_constant(["current"], [I10, I20, I30])
-	initial_traj.set_constant(["delta"], [delta10, delta20])
-	initial_traj.set_constant(["omega"], [omega10, omega20])
-	initial_traj.set_constant(["Tm"], [PC1, PC2])
-
-	print("Initial Trajectory:")
-	print("Voltages:")
-	print(initial_traj.w['voltage'])
-	print("Currents:")
-	print(initial_traj.w['current'])
-
-
-	# Test generator dynamics and aes
-
-	print("f(x)")
-	print(g1.f(np.array([0, omega10, PC1, V10_complex.real, V10_complex.imag, I10.real, I10.imag])))
-	print("ae(x)")
-	print(g1.ae(np.array([0, omega10, PC1, V10_complex.real, V10_complex.imag, I10.real, I10.imag])))
-
-	projected_traj = dykstra([Bi, Bnet], initial_traj, threshold=1e-3, max_iterations=5)
-
-	# Plotting results
-	time_points = np.arange(0, projected_traj.T, projected_traj.dt)
-	plt.figure(figsize=(12, 8))
-	plt.subplot(2, 1, 1)
-	plt.plot(time_points, np.abs(projected_traj.w['voltage'][0, :]), label='Voltage Magnitude at Bus 1')
-	plt.plot(time_points, np.abs(projected_traj.w['voltage'][1, :]), label='Voltage Magnitude at Bus 2')
-	plt.plot(time_points, np.abs(projected_traj.w['voltage'][2, :]), label='Voltage Magnitude at Bus 3')
-	plt.title('Voltage Trajectories')
-	plt.xlabel('Time (s)')
-	plt.ylabel('Voltage Magnitude')
-	plt.legend()
-	plt.grid()
-
-	plt.subplot(2, 1, 2)
-	plt.plot(time_points, np.angle(projected_traj.w['voltage'][0, :]), label='Voltage Angle at Bus 1')
-	plt.plot(time_points, np.angle(projected_traj.w['voltage'][1, :]), label='Voltage Angle at Bus 2')
-	plt.plot(time_points, np.angle(projected_traj.w['voltage'][2, :]), label='Voltage Angle at Bus 3')
-	plt.title('Voltage Angles')
-	plt.xlabel('Time (s)')
-	plt.ylabel('Voltage Angle (radians)')
-	plt.legend()
-	plt.grid()
-	plt.tight_layout()
-	plt.show()
-
 def test_const_load_projection():
 	load = ConstPowerLoad(lambda t: 2.1 + 0.5j)
-	traj = Trajectory(0.03, 0.01, {"voltage": 1, "current": 1})
+	traj = Trajectory(0.03, 0.01, {"voltage": 1, "current": 1, "power": 1})
 	traj.set_constant(["voltage"], [1.5 + 1j])
 	traj.set_constant(["current"], [2.2 - 0.3j])
 	projected_traj = load.project(traj)
@@ -815,24 +666,6 @@ def test_get_set_var_names():
 	assert np.allclose(combined[2:3, :], i_data)
 	print("test_get_set_var_names PASSED")
 
-def test_network_refactored():
-	n = 3
-	Ybus = np.array([[2-2j, -1+1j, -1+1j],
-	                 [-1+1j, 2-2j, -1+1j],
-	                 [-1+1j, -1+1j, 2-2j]], dtype=np.complex64)
-	network = Network(n, Ybus)
-	traj = Trajectory(0.1, 0.05, {"voltage": 3, "current": 3})
-	traj.w['voltage'] = np.array([[1.0+1.0j, 1.02+0.8j],
-	                               [0.98+0.9j, 1.0+1.0j],
-	                               [1.01+1.1j, 0.99+0.95j]], dtype=np.complex64)
-	traj.w['current'] = np.array([[0.0+0.1j, 0.5+0.2j],
-	                               [0.3+0.2j, 0.1+0.4j],
-	                               [0.2+0.3j, 0.4+0.1j]], dtype=np.complex64)
-	projected = network.project(traj)
-	residual = np.linalg.norm(Ybus @ projected.w['voltage'] - projected.w['current'])
-	assert residual < 1e-4, f"KCL residual too large: {residual}"
-	print(f"test_network_refactored PASSED (residual={residual:.2e})")
-
 def test_const_load_projection_refactored():
 	S = 2.1 + 0.5j
 	load = ConstPowerLoad(lambda t: S)
@@ -847,9 +680,175 @@ def test_const_load_projection_refactored():
 			f"Power constraint violated at t={k}: {computed_power[0,k]} != {S}"
 	print("test_const_load_projection_refactored PASSED")
 
-# test_const_load_projection()
-# test_dynamics()
-# test_dykstra()
-test_get_set_var_names()
-test_network_refactored()
-test_const_load_projection_refactored()
+def run_admm_feasibility_test():
+	omega_s = 2*np.pi*60
+	H1, D1, RD1, X1_p, Tsv1 = 8, 0, 0.04, 0.0608, 2
+	H2, D2, RD2, X2_p, Tsv2 = 3.01, 0, 0.04, 0.1813, 2
+
+	R12, R23, R13 = 0.01, 0.02, 0.01
+	X12, X23, X13 = 0.085, 0.161, 0.092
+	ysh12, ysh23, ysh13 = 0.088j, 0.153j, 0.079j
+
+	V10, theta10 = 1.04, 0.0
+	V20, theta20 = 1.025, -0.148 * np.pi / 180
+	V30, theta30 = 0.994, -7.65 * np.pi / 180
+
+	S10 = 1.597 + 0.452j
+	S20 = 0.791 - 0.279j
+	S30 = -2.35 - 0.5j
+	PC1 = np.real(S10)
+	PC2 = np.real(S20)
+
+	I10 = np.conj(S10 / (V10 * np.exp(1j * theta10)))
+	I20 = np.conj(S20 / (V20 * np.exp(1j * theta20)))
+	I30 = np.conj(S30 / (V30 * np.exp(1j * theta30)))
+
+	E1 = V10 * np.exp(1j * theta10) + 1j*X1_p * I10
+	E2 = V20 * np.exp(1j * theta20) + 1j*X2_p * I20
+	E10, delta10 = np.abs(E1), np.angle(E1)
+	E20, delta20 = np.abs(E2), np.angle(E2)
+
+	Ybus = np.array([
+		[1/(R12+1j*X12) + 1/(R13+1j*X13) + ysh12+ysh13, -1/(R12+1j*X12), -1/(R13+1j*X13)],
+		[-1/(R12+1j*X12), 1/(R12+1j*X12) + 1/(R23+1j*X23) + ysh12+ysh23, -1/(R23+1j*X23)],
+		[-1/(R13+1j*X13), -1/(R23+1j*X23), 1/(R13+1j*X13) + 1/(R23+1j*X23) + ysh13+ysh23]
+	], dtype=complex)
+
+	P_init, Q_init = np.real(S30), np.imag(S30)
+	P_post = -2.35
+
+	g1 = Generator(E10, 1j*X1_p, H1, D1, Tsv1, RD1, delta10, PC1)
+	g2 = Generator(E20, 1j*X2_p, H2, D2, Tsv2, RD2, delta20, PC2)
+	l1 = ConstPowerLoad(lambda t: P_init + 1j*Q_init if t < 0.5 else P_post + 1j*Q_init)
+	Bi = BusBehaviours([g1, g2], [l1])
+
+	gen_costs = [1.0, 1.2]
+	P_min = np.array([0.2, 0.2])
+	P_max = np.array([2.0, 2.0])
+	V_max = np.array([1.2, 1.2, 1.9])
+
+	initial_traj = Trajectory(2.5, 0.01, {
+		"voltage": 3, "current": 3, "power": 3,
+		"delta": 2, "omega": 2, "Tm": 2
+	})
+	initial_traj.set_constant(["voltage"], [V10*np.exp(1j*theta10), V20*np.exp(1j*theta20), V30*np.exp(1j*theta30)])
+	initial_traj.set_constant(["current"], [I10, I20, I30])
+	initial_traj.set_constant(["delta"], [delta10, delta20])
+	initial_traj.set_constant(["omega"], [omega_s, omega_s])
+	initial_traj.set_constant(["Tm"], [PC1, PC2])
+	initial_traj.set_constant(["power"], [S10, S20, S30])
+
+	obj = Objective(Ybus, gen_costs, P_min, P_max, V_max, initial_traj)
+
+	primal_residuals = []
+	def cb(iteration, x, z, _u):
+		primal_residuals.append((x - z).norm())
+		print(f"ADMM iteration {iteration+1}: primal residual = {primal_residuals[-1]:.4e}")
+
+	print("Running ADMM...")
+	sol = admm(obj, Bi, initial_traj, threshold=1e-3, max_iterations=15, callback=cb)
+
+	t_vec = np.arange(sol.N) * sol.dt
+	omega1 = np.real(sol.w["omega"][0, :])
+	omega2 = np.real(sol.w["omega"][1, :])
+	delta1 = np.real(sol.w["delta"][0, :])
+	delta2 = np.real(sol.w["delta"][1, :])
+	Tm1    = np.real(sol.w["Tm"][0, :])
+	Tm2    = np.real(sol.w["Tm"][1, :])
+	V_mag  = np.abs(sol.w["voltage"])
+	P      = np.real(sol.w["power"])
+	Q      = np.imag(sol.w["power"])
+
+	kcl_res = np.linalg.norm(Ybus @ sol.w["voltage"] - sol.w["current"], axis=0)
+	load_power_computed = sol.w["voltage"][2, :] * np.conj(sol.w["current"][2, :])
+	load_power_ref = np.array([l1.S(k * sol.dt) for k in range(sol.N)])
+	load_res = np.abs(load_power_computed - load_power_ref)
+
+	# Figure 1: Generator dynamics
+	fig1, axs = plt.subplots(2, 2, figsize=(12, 8))
+	fig1.suptitle("Generator Dynamics")
+
+	axs[0, 0].plot(t_vec, omega1, label="Gen 1")
+	axs[0, 0].plot(t_vec, omega2, label="Gen 2")
+	axs[0, 0].axhline(omega_s, color='k', linestyle='--', linewidth=0.8, label="ωs")
+	axs[0, 0].set_ylabel("ω (rad/s)")
+	axs[0, 0].set_title("Rotor Speed")
+	axs[0, 0].legend()
+
+	axs[0, 1].plot(t_vec, np.degrees(delta1), label="Gen 1")
+	axs[0, 1].plot(t_vec, np.degrees(delta2), label="Gen 2")
+	axs[0, 1].set_ylabel("δ (deg)")
+	axs[0, 1].set_title("Rotor Angle")
+	axs[0, 1].legend()
+
+	axs[1, 0].plot(t_vec, Tm1, label="Gen 1")
+	axs[1, 0].plot(t_vec, Tm2, label="Gen 2")
+	axs[1, 0].set_ylabel("Tm (pu)")
+	axs[1, 0].set_title("Mechanical Torque")
+	axs[1, 0].legend()
+
+	for bus in range(3):
+		axs[1, 1].plot(t_vec, V_mag[bus, :], label=f"Bus {bus+1}")
+	axs[1, 1].set_ylabel("|V| (pu)")
+	axs[1, 1].set_title("Bus Voltage Magnitudes")
+	axs[1, 1].legend()
+
+	for ax in axs.flat:
+		ax.set_xlabel("Time (s)")
+		ax.axvline(0.5, color='r', linestyle=':', linewidth=0.8)
+		ax.grid(True)
+	plt.tight_layout()
+
+	# Figure 2: Power
+	fig2, axs2 = plt.subplots(2, 1, figsize=(10, 7))
+	fig2.suptitle("Bus Power")
+
+	for bus in range(3):
+		axs2[0].plot(t_vec, P[bus, :], label=f"Bus {bus+1}")
+	axs2[0].axvline(0.5, color='r', linestyle=':', linewidth=0.8, label="disturbance")
+	axs2[0].set_ylabel("P (pu)")
+	axs2[0].set_title("Real Power")
+	axs2[0].legend()
+	axs2[0].grid(True)
+
+	for bus in range(3):
+		axs2[1].plot(t_vec, Q[bus, :], label=f"Bus {bus+1}")
+	axs2[1].axvline(0.5, color='r', linestyle=':', linewidth=0.8)
+	axs2[1].set_ylabel("Q (pu)")
+	axs2[1].set_title("Reactive Power")
+	axs2[1].set_xlabel("Time (s)")
+	axs2[1].legend()
+	axs2[1].grid(True)
+	plt.tight_layout()
+
+	# Figure 3: ADMM convergence and feasibility
+	fig3, axs3 = plt.subplots(3, 1, figsize=(10, 9))
+	fig3.suptitle("ADMM Convergence and Feasibility")
+
+	axs3[0].semilogy(primal_residuals, marker='o', markersize=3)
+	axs3[0].axhline(1e-3, color='r', linestyle='--', label="threshold")
+	axs3[0].set_xlabel("Iteration")
+	axs3[0].set_ylabel("‖x − z‖")
+	axs3[0].set_title("Primal Residual")
+	axs3[0].legend()
+	axs3[0].grid(True)
+
+	axs3[1].semilogy(t_vec, kcl_res + 1e-16)
+	axs3[1].set_xlabel("Time (s)")
+	axs3[1].set_ylabel("‖Ybus·V − I‖")
+	axs3[1].set_title("KCL Residual over Time")
+	axs3[1].grid(True)
+
+	axs3[2].semilogy(t_vec, load_res + 1e-16)
+	axs3[2].set_xlabel("Time (s)")
+	axs3[2].set_ylabel("|V·I* − S_load|")
+	axs3[2].set_title("Load Power Constraint Residual")
+	axs3[2].grid(True)
+
+	plt.tight_layout()
+	plt.show()
+
+
+# test_get_set_var_names()
+# test_const_load_projection_refactored()
+run_admm_feasibility_test()

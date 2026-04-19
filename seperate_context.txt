@@ -345,3 +345,95 @@ def test_dykstra():
 	axs.legend()
 	plt.grid()
 	plt.show()
+
+class Network(Projectable):
+	"""
+	A class representing a network with a given number of nodes and Ybus matrix.
+
+	Parameters
+	----------
+	n : int
+		Number of nodes in the network.
+	Ybus : numpy.ndarray
+		The admittance matrix of the network.
+	"""
+
+	def __init__(self, n, Ybus):
+		self.n = n
+		self.Ybus = Ybus
+
+		self.gram_matrix_inv = np.linalg.inv(Ybus @ Ybus.conj().T + np.eye(n))
+
+		A = np.eye(n) - Ybus.conj().T @ self.gram_matrix_inv @ Ybus
+		B = Ybus.conj().T @ self.gram_matrix_inv
+		C = self.gram_matrix_inv @ Ybus
+		D = np.eye(n) - self.gram_matrix_inv
+		self.projector = np.block([[A, B], [C, D]])
+
+	def project(self, trajectory: Trajectory) -> Trajectory:
+		"""
+		Projects the given trajectory onto the network
+
+		Parameters
+		----------
+		trajectory : Trajectory
+			The trajectory to project.
+
+		Returns
+		-------
+		Trajectory
+			The projected trajectory.
+		"""
+		
+		ret = trajectory.copy()
+		VI = ret.get_var_names(["voltage", "current"])
+		projected_VI = self.projector @ VI
+		ret.set_var_names(["voltage", "current"], projected_VI)
+
+		return ret
+
+
+
+
+def test_network():
+	n = 3
+	Ybus = np.array([[6, -1, -5],
+				  [-1, 7, -6],
+				  [-5, -6, 11]], dtype=np.complex64)
+	network = Network(n, Ybus)
+
+	vars = {
+		"voltage": n,
+		"current": n
+	}
+	traj = Trajectory(0.1, 0.05, vars)
+	traj.w['voltage'] = np.array([[1.0 + 1.0j, 1.02 + 0.8j], [1.0 + 0.5j, 1.2 + 0.6j], [1.0 + 0.3j, 1.2 + 0.4j]], dtype=np.complex64)
+	traj.w['current'] = np.array([[0.0 + 0.1j, 0.5 + 0.2j], [0.0 + 0.15j, 0.4 + 0.25j], [0.0 + 0.2j, 0.3 + 0.1j]], dtype=np.complex64)
+
+	projected_traj = network.project(traj)
+
+	print("Projected Voltages:")
+	print(projected_traj.w['voltage'])
+	print("Projected Currents:")
+	print(projected_traj.w['current'])
+
+	print("Residual:")
+	print(np.linalg.norm(Ybus @ projected_traj.w['voltage'] - projected_traj.w['current']))
+
+def test_network_refactored():
+	n = 3
+	Ybus = np.array([[2-2j, -1+1j, -1+1j],
+	                 [-1+1j, 2-2j, -1+1j],
+	                 [-1+1j, -1+1j, 2-2j]], dtype=np.complex64)
+	network = Network(n, Ybus)
+	traj = Trajectory(0.1, 0.05, {"voltage": 3, "current": 3})
+	traj.w['voltage'] = np.array([[1.0+1.0j, 1.02+0.8j],
+	                               [0.98+0.9j, 1.0+1.0j],
+	                               [1.01+1.1j, 0.99+0.95j]], dtype=np.complex64)
+	traj.w['current'] = np.array([[0.0+0.1j, 0.5+0.2j],
+	                               [0.3+0.2j, 0.1+0.4j],
+	                               [0.2+0.3j, 0.4+0.1j]], dtype=np.complex64)
+	projected = network.project(traj)
+	residual = np.linalg.norm(Ybus @ projected.w['voltage'] - projected.w['current'])
+	assert residual < 1e-4, f"KCL residual too large: {residual}"
+	print(f"test_network_refactored PASSED (residual={residual:.2e})")
