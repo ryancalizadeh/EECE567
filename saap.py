@@ -26,7 +26,7 @@ class Generator(Projectable):
 	A class implementing projections onto a single classical generator + fast governor behaviour
 	"""
 
-	def __init__(self, E, Zd, H, D, Tsv, R, delta0, Pc, max_iter=20, tol=1e-5):
+	def __init__(self, E, Zd, H, D, Tsv, R, delta0, Pc, V0, I0, S0, max_iter=20, tol=1e-5):
 		self.E = E
 		self.Zd = Zd
 		self.H = H
@@ -38,6 +38,9 @@ class Generator(Projectable):
 		self.ws = 2*np.pi*60
 		self.max_iter = max_iter
 		self.tol = tol
+		self.V0 = V0
+		self.I0 = I0
+		self.S0 = S0
 
 	def project(self, trajectory: Trajectory) -> Trajectory:
 		"""
@@ -106,12 +109,12 @@ class Generator(Projectable):
 		constraints_list.append(delta[0])
 		constraints_list.append(omega[0] - self.ws)
 		constraints_list.append(Tm[0] - self.Pc)
-		constraints_list.append(V_re[0] - V_traj_re[0, 0])
-		constraints_list.append(V_im[0] - V_traj_im[0, 0])
-		constraints_list.append(I_re[0] - I_traj_re[0, 0])
-		constraints_list.append(I_im[0] - I_traj_im[0, 0])
-		constraints_list.append(P[0] - P_traj[0, 0])
-		constraints_list.append(Q[0] - Q_traj[0, 0])
+		constraints_list.append(V_re[0] - self.V0.real)
+		constraints_list.append(V_im[0] - self.V0.imag)
+		constraints_list.append(I_re[0] - self.I0.real)
+		constraints_list.append(I_im[0] - self.I0.imag)
+		constraints_list.append(P[0] - self.S0.real)
+		constraints_list.append(Q[0] - self.S0.imag)
 
 		# # Add temporary constraint to fix variables for the first 0.5 seconds
 		# for k in range(min(int(0.5/dt), N)):
@@ -164,6 +167,20 @@ class Generator(Projectable):
 
 			constraints_list.append(P[k] - P_k)
 			constraints_list.append(Q[k] - Q_k)
+
+		# Terminal condition: enforce steady-state at final timestep
+		k = N - 1
+		f_delta_N = omega[k] - omega[k-1]
+		E_k_re = self.E * ca.cos(delta[k] + self.delta0)
+		E_k_im = self.E * ca.sin(delta[k] + self.delta0)
+		Pe_k = E_k_re * I_re[k] + E_k_im * I_im[k]
+		f_omega_N = (Tm[k] - Pe_k - self.D*(omega[k]/self.ws - 1)) * self.ws/(2*self.H)
+		f_Tm_N = (-Tm[k] + self.Pc - 1/self.R * (omega[k]/self.ws - 1)) / self.Tsv
+
+		# constraints_list.append(f_delta_N)   # omega[N-1] == ws
+		# constraints_list.append(f_omega_N)   # Tm[N-1] == Pe at final step
+		# constraints_list.append(f_Tm_N)      # Tm[N-1] at steady state
+
 		
 		constraints_vec = ca.vertcat(*constraints_list)
 
@@ -693,6 +710,10 @@ def run_admm_feasibility_test():
 	V20, theta20 = 1.025, -0.148 * np.pi / 180
 	V30, theta30 = 0.994, -7.65 * np.pi / 180
 
+	V10C = V10 * np.exp(1j * theta10)
+	V20C = V20 * np.exp(1j * theta20)
+
+
 	S10 = 1.597 + 0.452j
 	S20 = 0.791 - 0.279j
 	S30 = -2.35 - 0.5j
@@ -715,14 +736,14 @@ def run_admm_feasibility_test():
 	], dtype=complex)
 
 	P_init, Q_init = np.real(S30), np.imag(S30)
-	P_post = -2.35
+	P_post = -2.45
 
-	g1 = Generator(E10, 1j*X1_p, H1, D1, Tsv1, RD1, delta10, PC1)
-	g2 = Generator(E20, 1j*X2_p, H2, D2, Tsv2, RD2, delta20, PC2)
+	g1 = Generator(E10, 1j*X1_p, H1, D1, Tsv1, RD1, delta10, PC1, V10C, I10, S10)
+	g2 = Generator(E20, 1j*X2_p, H2, D2, Tsv2, RD2, delta20, PC2, V20C, I20, S20)
 	l1 = ConstPowerLoad(lambda t: P_init + 1j*Q_init if t < 0.5 else P_post + 1j*Q_init)
 	Bi = BusBehaviours([g1, g2], [l1])
 
-	gen_costs = [1.0, 1.2]
+	gen_costs = [1.2, 1.0]
 	P_min = np.array([0.2, 0.2])
 	P_max = np.array([2.0, 2.0])
 	V_max = np.array([1.2, 1.2, 1.9])
