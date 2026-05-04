@@ -1,0 +1,87 @@
+12 Buses:
+2026-04-20 07:57:45,573 BusBehaviours (sequential): 382.272s over 14 iteration(s), final residual = 3.4170e+00
+2026-04-20 08:02:04,572 BusBehavioursParallel (threaded): 258.986s over 14 iteration(s), final residual = 3.4170e+00
+2026-04-20 08:02:04,573 Speedup (sequential / parallel): 1.48x
+
+24 Buses:2026-04-20 08:42:27,412 Number of Buses: 4
+2026-04-20 08:44:18,775 BusBehaviours (sequential): 111.361s over 14 iteration(s), final residual = 2.0229e+00
+2026-04-20 08:45:42,534 BusBehavioursParallel (threaded): 83.751s over 14 iteration(s), final residual = 2.0229e+00
+2026-04-20 08:45:42,535 Speedup (sequential / parallel): 1.33x
+2026-04-20 08:45:56,432 Number of Buses: 6
+2026-04-20 08:45:56,432 Number of Buses: 6
+2026-04-20 08:48:50,167 BusBehaviours (sequential): 173.733s over 14 iteration(s), final residual = 2.4692e+00
+2026-04-20 08:48:50,167 BusBehaviours (sequential): 173.733s over 14 iteration(s), final residual = 2.4692e+00
+2026-04-20 08:52:17,908 BusBehavioursParallel (threaded): 207.732s over 14 iteration(s), final residual = 2.4692e+00
+2026-04-20 08:52:17,908 BusBehavioursParallel (threaded): 207.732s over 14 iteration(s), final residual = 2.4692e+00
+2026-04-20 08:52:17,908 Speedup (sequential / parallel): 0.84x
+2026-04-20 08:52:17,908 Speedup (sequential / parallel): 0.84x
+2026-04-20 08:53:39,296 Number of Buses: 8
+2026-04-20 08:53:39,296 Number of Buses: 8
+2026-04-20 08:53:39,296 Number of Buses: 8
+2026-04-20 08:57:34,358 BusBehaviours (sequential): 235.061s over 14 iteration(s), final residual = 2.7023e+00
+2026-04-20 08:57:34,358 BusBehaviours (sequential): 235.061s over 14 iteration(s), final residual = 2.7023e+00
+2026-04-20 08:57:34,358 BusBehaviours (sequential): 235.061s over 14 iteration(s), final residual = 2.7023e+00
+2026-04-20 09:01:02,839 BusBehavioursParallel (threaded): 208.472s over 14 iteration(s), final residual = 2.7023e+00
+2026-04-20 09:01:02,839 BusBehavioursParallel (threaded): 208.472s over 14 iteration(s), final residual = 2.7023e+00
+2026-04-20 09:01:02,839 BusBehavioursParallel (threaded): 208.472s over 14 iteration(s), final residual = 2.7023e+00
+2026-04-20 09:01:02,839 Speedup (sequential / parallel): 1.13x
+2026-04-20 09:01:02,839 Speedup (sequential / parallel): 1.13x
+2026-04-20 09:01:02,839 Speedup (sequential / parallel): 1.13x
+2026-04-20 09:01:18,115 Number of Buses: 10
+2026-04-20 09:01:18,115 Number of Buses: 10
+2026-04-20 09:01:18,115 Number of Buses: 10
+2026-04-20 09:01:18,115 Number of Buses: 10
+2026-04-20 09:06:24,487 BusBehaviours (sequential): 306.370s over 14 iteration(s), final residual = 3.0580e+00
+2026-04-20 09:06:24,487 BusBehaviours (sequential): 306.370s over 14 iteration(s), final residual = 3.0580e+00
+2026-04-20 09:06:24,487 BusBehaviours (sequential): 306.370s over 14 iteration(s), final residual = 3.0580e+00
+2026-04-20 09:06:24,487 BusBehaviours (sequential): 306.370s over 14 iteration(s), final residual = 3.0580e+00
+2026-04-20 09:10:00,734 BusBehavioursParallel (threaded): 216.241s over 14 iteration(s), final residual = 3.0580e+00
+2026-04-20 09:10:00,734 BusBehavioursParallel (threaded): 216.241s over 14 iteration(s), final residual = 3.0580e+00
+2026-04-20 09:10:00,734 BusBehavioursParallel (threaded): 216.241s over 14 iteration(s), final residual = 3.0580e+00
+2026-04-20 09:10:00,734 BusBehavioursParallel (threaded): 216.241s over 14 iteration(s), final residual = 3.0580e+00
+2026-04-20 09:10:00,735 Speedup (sequential / parallel): 1.42x
+2026-04-20 09:10:00,735 Speedup (sequential / parallel): 1.42x
+2026-04-20 09:10:00,735 Speedup (sequential / parallel): 1.42x
+2026-04-20 09:10:00,735 Speedup (sequential / parallel): 1.42x
+2026-04-20 15:52:37,027 Number of Buses: 12
+2026-04-20 16:04:42,001 BusBehaviours (sequential): 724.970s over 14 iteration(s), final residual = 3.4170e+00
+2026-04-20 16:12:33,876 BusBehavioursParallel (threaded): 471.852s over 14 iteration(s), final residual = 3.4170e+00
+2026-04-20 16:12:33,878 Speedup (sequential / parallel): 1.54x
+2026-04-20 16:12:54,209 Number of Buses: 14
+2026-04-20 16:12:54,209 Number of Buses: 14
+2026-04-20 16:29:16,223 BusBehaviours (sequential): 982.011s over 14 iteration(s), final residual = 3.5352e+00
+2026-04-20 16:29:16,223 BusBehaviours (sequential): 982.011s over 14 iteration(s), final residual = 3.5352e+00
+2026-04-20 16:38:38,321 BusBehavioursParallel (threaded): 562.086s over 14 iteration(s), final residual = 3.5352e+00
+2026-04-20 16:38:38,321 BusBehavioursParallel (threaded): 562.086s over 14 iteration(s), final residual = 3.5352e+00
+2026-04-20 16:38:38,325 Speedup (sequential / parallel): 1.75x
+2026-04-20 16:38:38,325 Speedup (sequential / parallel): 1.75x
+2026-04-20 16:41:01,388 Number of Buses: 16
+2026-04-20 16:41:01,388 Number of Buses: 16
+2026-04-20 16:41:01,388 Number of Buses: 16
+2026-04-20 16:51:22,029 BusBehaviours (sequential): 620.638s over 14 iteration(s), final residual = 3.8605e+00
+2026-04-20 16:51:22,029 BusBehaviours (sequential): 620.638s over 14 iteration(s), final residual = 3.8605e+00
+2026-04-20 16:51:22,029 BusBehaviours (sequential): 620.638s over 14 iteration(s), final residual = 3.8605e+00
+2026-04-20 17:03:53,566 BusBehavioursParallel (threaded): 751.525s over 14 iteration(s), final residual = 3.8605e+00
+2026-04-20 17:03:53,566 BusBehavioursParallel (threaded): 751.525s over 14 iteration(s), final residual = 3.8605e+00
+2026-04-20 17:03:53,566 BusBehavioursParallel (threaded): 751.525s over 14 iteration(s), final residual = 3.8605e+00
+2026-04-20 17:03:53,567 Speedup (sequential / parallel): 0.83x
+2026-04-20 17:03:53,567 Speedup (sequential / parallel): 0.83x
+2026-04-20 17:03:53,567 Speedup (sequential / parallel): 0.83x
+2026-04-20 17:32:54,645 Number of Buses: 18
+2026-04-20 17:42:58,351 BusBehaviours (sequential): 603.701s over 14 iteration(s), final residual = 4.1462e+00
+2026-04-20 17:52:21,927 BusBehavioursParallel (threaded): 563.562s over 14 iteration(s), final residual = 4.1462e+00
+2026-04-20 17:52:21,927 Speedup (sequential / parallel): 1.07x
+2026-04-20 18:37:47,664 Number of Buses: 20
+2026-04-20 18:37:47,664 Number of Buses: 20
+2026-04-20 19:05:10,560 Number of Buses: 16
+2026-04-20 19:13:58,936 BusBehaviours (sequential): 528.372s over 14 iteration(s), final residual = 3.8605e+00
+2026-04-20 19:21:31,168 BusBehavioursParallel (threaded): 452.219s over 14 iteration(s), final residual = 3.8605e+00
+2026-04-20 19:21:31,169 Speedup (sequential / parallel): 1.17x
+2026-04-20 19:59:18,193 Number of Buses: 14
+2026-04-20 20:06:34,823 BusBehaviours (sequential): 436.627s over 14 iteration(s), final residual = 3.5352e+00
+2026-04-20 20:12:48,737 BusBehavioursParallel (threaded): 373.902s over 14 iteration(s), final residual = 3.5352e+00
+2026-04-20 20:12:48,737 Speedup (sequential / parallel): 1.17x
+2026-04-20 20:16:45,957 Number of Buses: 12
+2026-04-20 20:22:39,850 BusBehaviours (sequential): 353.890s over 14 iteration(s), final residual = 3.4170e+00
+2026-04-20 20:27:02,477 BusBehavioursParallel (threaded): 262.611s over 14 iteration(s), final residual = 3.4170e+00
+2026-04-20 20:27:02,478 Speedup (sequential / parallel): 1.35x

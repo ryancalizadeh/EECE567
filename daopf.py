@@ -1,0 +1,519 @@
+import os
+
+import numpy as np
+import casadi as ca
+import matplotlib.pyplot as plt
+import time
+import logging
+from saap import Trajectory, Generator, ConstPowerLoad
+
+
+def solve_daopf(
+    Ybus: np.ndarray,
+    gens: list,
+    loads: list,
+    load_buses: list,
+    gen_costs: list,
+    P_min: np.ndarray,
+    P_max: np.ndarray,
+    V_max: np.ndarray,
+    T: float,
+    dt: float,
+) -> Trajectory:
+    """
+    Solves the dynamics-aware OPF as a single monolithic NLP using CasADI/IPOPT.
+
+    Decision variables (real-valued):
+      V_re, V_im  : (n_buses, N)  bus voltages
+      I_re, I_im  : (n_buses, N)  bus currents
+      delta_i     : (N,)          rotor angle deviation per generator
+      omega_i     : (N,)          rotor speed per generator
+      Tm_i        : (N,)          mechanical torque per generator
+    """
+    N = int(T / dt)
+    n_buses = Ybus.shape[0]
+    n_gens = len(gens)
+    n_loads = len(loads)
+    ws = 2 * np.pi * 60
+
+    Ybus_re = np.real(Ybus)
+    Ybus_im = np.imag(Ybus)
+
+    # ------------------------------------------------------------------ #
+    # Decision variables
+    # ------------------------------------------------------------------ #
+    V_re = ca.MX.sym("V_re", n_buses, N) # type: ignore
+    V_im = ca.MX.sym("V_im", n_buses, N) # type: ignore
+    I_re = ca.MX.sym("I_re", n_buses, N) # type: ignore
+    I_im = ca.MX.sym("I_im", n_buses, N) # type: ignore
+
+    # Per-generator state variables
+    deltas = [ca.MX.sym(f"delta_{i}", N) for i in range(n_gens)] # type: ignore
+    omegas = [ca.MX.sym(f"omega_{i}", N) for i in range(n_gens)] # type: ignore
+    Tms    = [ca.MX.sym(f"Tm_{i}",    N) for i in range(n_gens)] # type: ignore
+    # Free control: governor power setpoint (optimizer chooses this trajectory)
+    Pcs    = [ca.MX.sym(f"Pc_{i}",    N) for i in range(n_gens)] # type: ignore
+
+    # Flatten to one vector for nlpsol
+    x_parts = [
+        ca.reshape(V_re, -1, 1),
+        ca.reshape(V_im, -1, 1),
+        ca.reshape(I_re, -1, 1),
+        ca.reshape(I_im, -1, 1),
+    ]
+    for i in range(n_gens):
+        x_parts += [deltas[i], omegas[i], Tms[i], Pcs[i]]
+    x = ca.vertcat(*x_parts)
+
+    # ------------------------------------------------------------------ #
+    # Bounds
+    # ------------------------------------------------------------------ #
+    lbx_V_re = np.full((n_buses, N), -np.inf)
+    ubx_V_re = np.full((n_buses, N),  np.inf)
+    lbx_V_im = np.full((n_buses, N), -np.inf)
+    ubx_V_im = np.full((n_buses, N),  np.inf)
+    lbx_I_re = np.full((n_buses, N), -np.inf)
+    ubx_I_re = np.full((n_buses, N),  np.inf)
+    lbx_I_im = np.full((n_buses, N), -np.inf)
+    ubx_I_im = np.full((n_buses, N),  np.inf)
+
+    P_min_arr = np.array(P_min)
+    P_max_arr = np.array(P_max)
+
+    lbx_delta = [np.full(N, -np.inf) for _ in range(n_gens)]
+    ubx_delta = [np.full(N,  np.inf) for _ in range(n_gens)]
+    lbx_omega = [np.full(N, ws - 0.08) for _ in range(n_gens)]
+    ubx_omega = [np.full(N, ws + 0.08) for _ in range(n_gens)]
+    lbx_Tm    = [np.full(N, -np.inf) for _ in range(n_gens)]
+    ubx_Tm    = [np.full(N,  np.inf) for _ in range(n_gens)]
+    lbx_Pc    = [np.full(N, P_min_arr[i]) for i in range(n_gens)]
+    ubx_Pc    = [np.full(N, P_max_arr[i]) for i in range(n_gens)]
+
+    lbx_parts = [lbx_V_re.flatten(), lbx_V_im.flatten(),
+                 lbx_I_re.flatten(), lbx_I_im.flatten()]
+    ubx_parts = [ubx_V_re.flatten(), ubx_V_im.flatten(),
+                 ubx_I_re.flatten(), ubx_I_im.flatten()]
+    for i in range(n_gens):
+        lbx_parts += [lbx_delta[i], lbx_omega[i], lbx_Tm[i], lbx_Pc[i]]
+        ubx_parts += [ubx_delta[i], ubx_omega[i], ubx_Tm[i], ubx_Pc[i]]
+    lbx = np.concatenate(lbx_parts)
+    ubx = np.concatenate(ubx_parts)
+
+    # ------------------------------------------------------------------ #
+    # Constraints
+    # ------------------------------------------------------------------ #
+    g_list = []
+    lbg_list = []
+    ubg_list = []
+
+    def eq(expr):
+        g_list.append(ca.reshape(expr, -1, 1))
+        sz = expr.numel()
+        lbg_list.append(np.zeros(sz))
+        ubg_list.append(np.zeros(sz))
+
+    def ineq_lb(expr, lb):
+        # lb <= expr  ->  0 <= expr - lb
+        g_list.append(ca.reshape(expr - lb, -1, 1))
+        sz = expr.numel()
+        lbg_list.append(np.zeros(sz))
+        ubg_list.append(np.full(sz, np.inf))
+
+    def ineq_ub(expr, ub):
+        # expr <= ub  ->  0 <= ub - expr
+        g_list.append(ca.reshape(ub - expr, -1, 1))
+        sz = expr.numel()
+        lbg_list.append(np.zeros(sz))
+        ubg_list.append(np.full(sz, np.inf))
+
+    # 1. KCL: Ybus @ V = I  (real and imaginary parts, all timesteps)
+    for k in range(N):
+        kcl_re = Ybus_re @ V_re[:, k] - Ybus_im @ V_im[:, k] - I_re[:, k]
+        kcl_im = Ybus_im @ V_re[:, k] + Ybus_re @ V_im[:, k] - I_im[:, k]
+        eq(kcl_re)
+        eq(kcl_im)
+
+    # 2. Generator DAE constraints (trapezoidal discretization)
+    for i, gen in enumerate(gens):
+        bus = i  # generator i is connected to bus i
+        delta = deltas[i]
+        omega = omegas[i]
+        Tm    = Tms[i]
+        Pc    = Pcs[i]
+
+        # Initial conditions (V/I at t=0 are determined by KCL + algebraic + load)
+        eq(delta[0])
+        eq(omega[0] - ws)
+        eq(Tm[0] - gen.Pc)
+
+        # ODE: trapezoidal rule for k = 0..N-2
+        for k in range(N - 1):
+            # --- delta_dot = omega - ws ---
+            f_d_k  = omega[k]   - ws
+            f_d_k1 = omega[k+1] - ws
+            eq(delta[k+1] - delta[k] - (dt/2) * (f_d_k + f_d_k1))
+
+            # --- omega_dot ---
+            E_re_k  = gen.E * ca.cos(delta[k]   + gen.delta0)
+            E_im_k  = gen.E * ca.sin(delta[k]   + gen.delta0)
+            E_re_k1 = gen.E * ca.cos(delta[k+1] + gen.delta0)
+            E_im_k1 = gen.E * ca.sin(delta[k+1] + gen.delta0)
+
+            Pe_k  = E_re_k  * I_re[bus, k]   + E_im_k  * I_im[bus, k]
+            Pe_k1 = E_re_k1 * I_re[bus, k+1] + E_im_k1 * I_im[bus, k+1]
+
+            f_o_k  = (Tm[k]   - Pe_k  - gen.D * (omega[k]   / ws - 1)) * ws / (2 * gen.H)
+            f_o_k1 = (Tm[k+1] - Pe_k1 - gen.D * (omega[k+1] / ws - 1)) * ws / (2 * gen.H)
+            eq(omega[k+1] - omega[k] - (dt/2) * (f_o_k + f_o_k1))
+
+            # --- Tm_dot ---
+            f_T_k  = (-Tm[k]   + Pc[k]   - (1/gen.R) * (omega[k]   / ws - 1)) / gen.Tsv
+            f_T_k1 = (-Tm[k+1] + Pc[k+1] - (1/gen.R) * (omega[k+1] / ws - 1)) / gen.Tsv
+            eq(Tm[k+1] - Tm[k] - (dt/2) * (f_T_k + f_T_k1))
+
+        # Algebraic: E - Zd*I - V = 0 at every timestep
+        Zd_re = gen.Zd.real
+        Zd_im = gen.Zd.imag
+        for k in range(N):
+            E_re_k = gen.E * ca.cos(delta[k] + gen.delta0)
+            E_im_k = gen.E * ca.sin(delta[k] + gen.delta0)
+            alg_re = E_re_k - Zd_re * I_re[bus, k] + Zd_im * I_im[bus, k] - V_re[bus, k]
+            alg_im = E_im_k - Zd_re * I_im[bus, k] - Zd_im * I_re[bus, k] - V_im[bus, k]
+            eq(alg_re)
+            eq(alg_im)
+
+    # 3. Load power constraints: V * conj(I) = S_load(t)
+    for load, bus in zip(loads, load_buses):
+        for k in range(N):
+            s = load.S(k * dt)
+            P_load = s.real
+            Q_load = s.imag
+            # Re(V * conj(I)) = P_load
+            eq(V_re[bus, k] * I_re[bus, k] + V_im[bus, k] * I_im[bus, k] - P_load)
+            # Im(V * conj(I)) = Q_load  [Im(V*conj(I)) = V_im*I_re - V_re*I_im]
+            eq(V_im[bus, k] * I_re[bus, k] - V_re[bus, k] * I_im[bus, k] - Q_load)
+
+    # 4. Generation limits: P_min <= Re(V*conj(I)) <= P_max  per generator bus
+    P_min = np.array(P_min)
+    P_max = np.array(P_max)
+    for i in range(n_gens):
+        for k in range(N):
+            P_gen = V_re[i, k] * I_re[i, k] + V_im[i, k] * I_im[i, k]
+            ineq_lb(P_gen, P_min[i])
+            ineq_ub(P_gen, P_max[i])
+
+    # 5. Voltage magnitude limits: |V|^2 <= V_max^2
+    V_max = np.array(V_max)
+    for bus in range(n_buses):
+        for k in range(N):
+            V_sq = V_re[bus, k]**2 + V_im[bus, k]**2
+            ineq_ub(V_sq, V_max[bus]**2)
+
+    g = ca.vertcat(*g_list)
+    lbg = np.concatenate(lbg_list)
+    ubg = np.concatenate(ubg_list)
+
+    # ------------------------------------------------------------------ #
+    # Objective: minimize generation cost sum_i c_i * P_gen_i(k)^2
+    # ------------------------------------------------------------------ #
+    obj = 0
+    for i, c in enumerate(gen_costs):
+        for k in range(N):
+            P_gen = V_re[i, k] * I_re[i, k] + V_im[i, k] * I_im[i, k]
+            obj += c * P_gen**2
+
+    # ------------------------------------------------------------------ #
+    # Warm start: steady-state initial conditions
+    # ------------------------------------------------------------------ #
+    V_re0 = np.tile(np.array([g.V0.real for g in gens] +
+                              [0.0] * n_loads).reshape(-1, 1), (1, N))
+    V_im0 = np.tile(np.array([g.V0.imag for g in gens] +
+                              [0.0] * n_loads).reshape(-1, 1), (1, N))
+    I_re0 = np.tile(np.array([g.I0.real for g in gens] +
+                              [0.0] * n_loads).reshape(-1, 1), (1, N))
+    I_im0 = np.tile(np.array([g.I0.imag for g in gens] +
+                              [0.0] * n_loads).reshape(-1, 1), (1, N))
+
+    x0_parts = [V_re0.flatten(), V_im0.flatten(),
+                I_re0.flatten(), I_im0.flatten()]
+    for i, gen in enumerate(gens):
+        x0_parts += [np.zeros(N), np.full(N, ws), np.full(N, gen.Pc), np.full(N, gen.Pc)]
+    x0 = np.concatenate(x0_parts)
+
+    # ------------------------------------------------------------------ #
+    # Solve
+    # ------------------------------------------------------------------ #
+    opts = {
+        "ipopt.print_level": 5,
+        "ipopt.tol": 1e-3,
+        "ipopt.max_iter": 1000,
+        "ipopt.acceptable_tol": 1e-5,
+        "ipopt.acceptable_iter": 10,
+        "ipopt.mu_strategy": "adaptive",
+        "ipopt.nlp_scaling_method": "gradient-based",
+    }
+    nlp = {"f": obj, "x": x, "g": g}
+    solver = ca.nlpsol("daopf_solver", "ipopt", nlp, opts)
+
+    print("Solving centralized DA-OPF NLP...")
+    sol = solver(x0=x0, lbx=lbx, ubx=ubx, lbg=lbg, ubg=ubg)
+    print(f"Solver status: {solver.stats()['return_status']}")
+
+    # ------------------------------------------------------------------ #
+    # Extract solution into a Trajectory
+    # ------------------------------------------------------------------ #
+    xv = sol["x"].full().flatten()
+    offset = 0
+
+    def take(shape):
+        nonlocal offset
+        sz = int(np.prod(shape))
+        arr = xv[offset: offset + sz].reshape(shape)
+        offset += sz
+        return arr
+
+    sol_V_re = take((n_buses, N))
+    sol_V_im = take((n_buses, N))
+    sol_I_re = take((n_buses, N))
+    sol_I_im = take((n_buses, N))
+    sol_delta = np.zeros((n_gens, N))
+    sol_omega = np.zeros((n_gens, N))
+    sol_Tm    = np.zeros((n_gens, N))
+    sol_Pc    = np.zeros((n_gens, N))
+    for i in range(n_gens):
+        sol_delta[i] = take((N,))
+        sol_omega[i] = take((N,))
+        sol_Tm[i]    = take((N,))
+        sol_Pc[i]    = take((N,))
+
+    sol_V = sol_V_re + 1j * sol_V_im
+    sol_I = sol_I_re + 1j * sol_I_im
+    sol_S = sol_V * np.conj(sol_I)
+
+    traj = Trajectory(T, dt, {
+        "voltage": n_buses, "current": n_buses, "power": n_buses,
+        "delta": n_gens, "omega": n_gens, "Tm": n_gens, "Pc": n_gens,
+    })
+    traj.w["voltage"] = sol_V
+    traj.w["current"] = sol_I
+    traj.w["power"]   = sol_S
+    traj.w["delta"]   = sol_delta.astype(np.complex64)
+    traj.w["omega"]   = sol_omega.astype(np.complex64)
+    traj.w["Tm"]      = sol_Tm.astype(np.complex64)
+    traj.w["Pc"]      = sol_Pc.astype(np.complex64)
+
+    return traj
+
+
+def run_daopf_test(num_buses: int = 24):
+    assert num_buses % 2 == 0, "num_buses must be even"
+    omega_s = 2 * np.pi * 60
+    n_buses = num_buses
+    n_gens = n_loads = num_buses // 2
+
+    # Identical generator parameters
+    H, D, RD, X_p, Tsv = 8, 0, 0.04, 0.0608, 2
+
+    # Initial bus voltages
+    theta_gens  = np.linspace(0.0, -2.0, n_gens)  * np.pi / 180
+    theta_loads = np.linspace(-6.0, -8.0, n_loads) * np.pi / 180
+    V_init = np.concatenate([
+        1.04 * np.exp(1j * theta_gens),
+        0.99 * np.exp(1j * theta_loads),
+    ])
+
+    # Balanced power injections
+    S_gen0  =  0.40 + 0.08j
+    S_load0 = -0.40 - 0.08j
+    S_init  = np.concatenate([np.full(n_gens, S_gen0), np.full(n_loads, S_load0)])
+    I_init  = np.conj(S_init / V_init)
+
+    # Load disturbance at t=0.5s
+    rng = np.random.default_rng(42)
+    dP_loads    = rng.uniform(-0.2, 0.2, n_loads)
+    P_load_post = np.real(S_load0) + dP_loads
+    Q_load0     = np.imag(S_load0)
+
+    # Ybus: two rings (gen 0..n_gens-1, load n_gens..n_buses-1) + cross-links
+    # Each bus has degree 3 -> sparse but fully connected
+    half = n_gens // 2
+    branches = (
+        [(i, (i+1) % n_gens) for i in range(n_gens)] +                             # generator ring
+        [(n_gens + i, n_gens + (i+1) % n_loads) for i in range(n_loads)] +         # load ring
+        [(i, n_gens + (2*i) % n_loads) for i in range(half)] +                     # cross-links (first half)
+        [(half + i, n_gens + (2*i+1) % n_loads) for i in range(half)]              # cross-links (second half)
+    )
+    y_line   = 1.0 / (0.01 + 0.085j)
+    ysh_line = 0.044j
+    Ybus = np.zeros((n_buses, n_buses), dtype=complex)
+    for bi, bj in branches:
+        Ybus[bi, bi] += y_line + ysh_line
+        Ybus[bj, bj] += y_line + ysh_line
+        Ybus[bi, bj] -= y_line
+        Ybus[bj, bi] -= y_line
+
+    # Generator EMF
+    E_complex = V_init[:n_gens] + 1j * X_p * I_init[:n_gens]
+    E_mags    = np.abs(E_complex)
+    delta0s   = np.angle(E_complex)
+    PC_each   = np.real(S_gen0)
+
+    gen_costs = [1.0] * n_gens
+    P_min = np.full(n_gens, 0.1)
+    P_max = np.full(n_gens, 1.0)
+    V_max = np.concatenate([np.full(n_gens, 1.2), np.full(n_loads, 1.15)])
+
+    gens = [
+        Generator(E_mags[i], 1j*X_p, H, D, Tsv, RD, delta0s[i], PC_each,
+                  V_init[i], I_init[i], S_init[i])
+        for i in range(n_gens)
+    ]
+    loads = [
+        ConstPowerLoad(
+            lambda t, p0=np.real(S_load0), p1=float(P_load_post[j]), q=Q_load0:
+                p0 + 1j*q if t < 0.5 else p1 + 1j*q
+        )
+        for j in range(n_loads)
+    ]
+    load_buses = list(range(n_gens, n_buses))
+
+    log = logging.getLogger("daopf_benchmark")
+    log.setLevel(logging.INFO)
+    fh = logging.FileHandler("daopf_benchmark.log", mode="a")
+    fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    log.addHandler(fh)
+
+    t0 = time.perf_counter()
+    sol = solve_daopf(
+        Ybus=Ybus,
+        gens=gens,
+        loads=loads,
+        load_buses=load_buses,
+        gen_costs=gen_costs,
+        P_min=P_min,
+        P_max=P_max,
+        V_max=V_max,
+        T=5.0,
+        dt=0.01,
+    )
+    elapsed = time.perf_counter() - t0
+    log.info("Number of Buses: " + str(n_buses))
+    log.info(f"solve_daopf: {elapsed:.3f}s")
+    print(f"DA-OPF solve time: {elapsed:.3f}s (logged to daopf_benchmark.log)")
+
+    t_vec = np.arange(sol.N) * sol.dt
+    V_mag = np.abs(sol.w["voltage"])
+    P     = np.real(sol.w["power"])
+    Q     = np.imag(sol.w["power"])
+
+    kcl_res = np.linalg.norm(Ybus @ sol.w["voltage"] - sol.w["current"], axis=0)
+    load_res_per_bus = [
+        np.abs(
+            sol.w["voltage"][n_gens + j, :] * np.conj(sol.w["current"][n_gens + j, :])
+            - np.array([loads[j].S(k * sol.dt) for k in range(sol.N)])
+        )
+        for j in range(n_loads)
+    ]
+    load_res = np.max(load_res_per_bus, axis=0)
+
+    print(f"Max KCL residual:        {kcl_res.max():.3e}")
+    print(f"Max load power residual: {load_res.max():.3e}")
+
+    # Figure 1: Generator dynamics
+    fig1, axs = plt.subplots(2, 2, figsize=(14, 10))
+    fig1.suptitle("DA-OPF (Centralized) — Generator Dynamics (12-bus)")
+
+    for i in range(n_gens):
+        axs[0, 0].plot(t_vec, np.real(sol.w["omega"][i, :]), label=f"Gen {i+1}")
+    axs[0, 0].axhline(omega_s, color="k", linestyle="--", linewidth=0.8, label="ωs")
+    axs[0, 0].set_ylabel("ω (rad/s)")
+    axs[0, 0].set_title("Rotor Speed")
+    axs[0, 0].legend(fontsize=7)
+
+    for i in range(n_gens):
+        axs[0, 1].plot(t_vec, np.degrees(np.real(sol.w["delta"][i, :])), label=f"Gen {i+1}")
+    axs[0, 1].set_ylabel("δ (deg)")
+    axs[0, 1].set_title("Rotor Angle")
+    axs[0, 1].legend(fontsize=7)
+
+    for i in range(n_gens):
+        axs[1, 0].plot(t_vec, np.real(sol.w["Tm"][i, :]), label=f"Gen {i+1}")
+    axs[1, 0].set_ylabel("Tm (pu)")
+    axs[1, 0].set_title("Mechanical Torque")
+    axs[1, 0].legend(fontsize=7)
+
+    for bus in range(n_buses):
+        lbl = f"Gen {bus+1}" if bus < n_gens else f"Load {bus-n_gens+1}"
+        axs[1, 1].plot(t_vec, V_mag[bus, :], label=lbl)
+    axs[1, 1].set_ylabel("|V| (pu)")
+    axs[1, 1].set_title("Bus Voltage Magnitudes")
+    axs[1, 1].legend(fontsize=6)
+
+    for ax in axs.flat:
+        ax.set_xlabel("Time (s)")
+        ax.axvline(0.5, color="r", linestyle=":", linewidth=0.8)
+        ax.grid(True)
+    plt.tight_layout()
+
+    # Figure 2: Power
+    fig2, axs2 = plt.subplots(2, 1, figsize=(12, 8))
+    fig2.suptitle("DA-OPF (Centralized) — Bus Power (12-bus)")
+
+    for bus in range(n_buses):
+        lbl = f"Gen {bus+1}" if bus < n_gens else f"Load {bus-n_gens+1}"
+        axs2[0].plot(t_vec, P[bus, :], label=lbl)
+    axs2[0].axvline(0.5, color="r", linestyle=":", linewidth=0.8, label="disturbance")
+    axs2[0].set_ylabel("P (pu)")
+    axs2[0].set_title("Real Power")
+    axs2[0].legend(fontsize=6)
+    axs2[0].grid(True)
+
+    for bus in range(n_buses):
+        lbl = f"Gen {bus+1}" if bus < n_gens else f"Load {bus-n_gens+1}"
+        axs2[1].plot(t_vec, Q[bus, :], label=lbl)
+    axs2[1].axvline(0.5, color="r", linestyle=":", linewidth=0.8)
+    axs2[1].set_ylabel("Q (pu)")
+    axs2[1].set_title("Reactive Power")
+    axs2[1].set_xlabel("Time (s)")
+    axs2[1].legend(fontsize=6)
+    axs2[1].grid(True)
+    plt.tight_layout()
+
+    # Figure 3: Feasibility residuals
+    fig3, axs3 = plt.subplots(2, 1, figsize=(10, 6))
+    fig3.suptitle("DA-OPF (Centralized) — Constraint Residuals")
+
+    axs3[0].semilogy(t_vec, kcl_res + 1e-16)
+    axs3[0].set_xlabel("Time (s)")
+    axs3[0].set_ylabel("‖Ybus·V − I‖")
+    axs3[0].set_title("KCL Residual over Time")
+    axs3[0].grid(True)
+
+    axs3[1].semilogy(t_vec, load_res + 1e-16)
+    axs3[1].set_xlabel("Time (s)")
+    axs3[1].set_ylabel("|V·I* - S_load| (max over loads)")
+    axs3[1].set_title("Load Power Constraint Residual")
+    axs3[1].grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+    return elapsed
+
+
+if __name__ == "__main__":
+    import pickle
+
+    times = {}
+    if os.path.exists("daopf_times.pkl"):
+        with open("daopf_times.pkl", "rb") as f:
+            times = pickle.load(f)
+
+    busses = 18
+    timing_results = run_daopf_test(num_buses=busses)
+    times[busses] = timing_results
+
+    # Save times dict to file
+    import pickle
+    with open("daopf_times.pkl", "wb") as f:
+        pickle.dump(times, f)
