@@ -1,695 +1,18 @@
 import os
-
 import numpy as np
 import matplotlib.pyplot as plt
-from abc import ABC, abstractmethod
-from typing import Callable
-import casadi as ca
-from scipy.optimize import minimize_scalar
-import cvxpy as cp
 import time
 import logging
+from SysParams import SysParams
+from Trajectory import Trajectory
+from Projectable import Projectable
+from Generator import Generator
+from ConstPowerLoad import ConstPowerLoad
+from BusBehaviours import BusBehaviours, BusBehavioursParallel
+from Objective import Objective
+from Solvable import Solvable
+from OPF import solve_opf, ic_from_opf
 
-
-class Projectable(ABC):
-	"""
-	An abstract base class representing a projectable set.
-
-	Methods
-	-------
-	project(trajectory: Trajectory) -> Trajectory
-		Projects the given trajectory onto the set.
-	"""
-
-	@abstractmethod
-	def project(self, trajectory: Trajectory) -> Trajectory:
-		pass
-
-class Generator(Projectable):
-	"""
-	A class implementing projections onto a single classical generator + fast governor behaviour
-	"""
-
-	def __init__(self, E, Zd, H, D, Tsv, R, delta0, Pc, V0, I0, S0, max_iter=20, tol=1e-5, Pc_min=-np.inf, Pc_max=np.inf):
-		self.E = E
-		self.Zd = Zd
-		self.H = H
-		self.D = D
-		self.Tsv = Tsv
-		self.R = R
-		self.delta0 = delta0
-		self.Pc = Pc
-		self.ws = 2*np.pi*60
-		self.max_iter = max_iter
-		self.tol = tol
-		self.V0 = V0
-		self.I0 = I0
-		self.S0 = S0
-		self.Pc_min = Pc_min
-		self.Pc_max = Pc_max
-
-	def project(self, trajectory: Trajectory) -> Trajectory:
-		"""
-		Projects the given trajectory onto the generator's behaviour. In particular, it solves
-
-		min ||w - trajectory||_2^2
-		s.t. w satisfies the generator's DAE constraints, which are discretized using the trapezoidal rule.
-		
-		Uses CasADI and IPOPT to solve the resulting nonlinear program, and uses the previous solution as a warm start for the next time step to speed up convergence.
-		
-		Parameters
-		----------
-		trajectory : Trajectory
-			The trajectory to project.
-		
-		Returns
-		-------
-		Trajectory
-			The projected trajectory.
-		"""
-		
-		ret = trajectory.copy()
-		N = trajectory.N
-		dt = trajectory.dt
-
-		# Total number of variables: delta, omega, Tm, V_re, V_im, I_re, I_im, P, Q, Pc
-		n_vars = 10
-
-		# Extract measurement data
-		V_traj = trajectory.get_var_names(["voltage"])
-		I_traj = trajectory.get_var_names(["current"])
-		delta_traj = trajectory.get_var_names(["delta"])
-		omega_traj = trajectory.get_var_names(["omega"])
-		Tm_traj = trajectory.get_var_names(["Tm"])
-		S_traj = trajectory.get_var_names(["power"])
-		Pc_traj = trajectory.get_var_names(["Pc"])
-
-		V_traj_re = np.real(V_traj)
-		V_traj_im = np.imag(V_traj)
-		I_traj_re = np.real(I_traj)
-		I_traj_im = np.imag(I_traj)
-		delta_traj = np.real(delta_traj)
-		omega_traj = np.real(omega_traj)
-		Tm_traj = np.real(Tm_traj)
-		P_traj = np.real(S_traj)
-		Q_traj = np.imag(S_traj)
-		Pc_traj = np.real(Pc_traj)
-
-		# Create optimization variables (as 2D matrix for easier indexing)
-		x_matrix = ca.MX.sym('x', (n_vars, N))  # type: ignore
-		# Flatten to vector for nlpsol (which requires a dense vector)
-		x = ca.reshape(x_matrix, -1, 1)
-
-		delta = x_matrix[0, :]
-		omega = x_matrix[1, :]
-		Tm = x_matrix[2, :]
-		V_re = x_matrix[3, :]
-		V_im = x_matrix[4, :]
-		I_re = x_matrix[5, :]
-		I_im = x_matrix[6, :]
-		P = x_matrix[7, :]
-		Q = x_matrix[8, :]
-		Pc = x_matrix[9, :]
-
-		# Build constraints vector
-		constraints_list = []
-		
-		# Initial conditions
-		constraints_list.append(delta[0])
-		constraints_list.append(omega[0] - self.ws)
-		constraints_list.append(Tm[0] - self.Pc)
-		constraints_list.append(V_re[0] - self.V0.real)
-		constraints_list.append(V_im[0] - self.V0.imag)
-		constraints_list.append(I_re[0] - self.I0.real)
-		constraints_list.append(I_im[0] - self.I0.imag)
-		constraints_list.append(P[0] - self.S0.real)
-		constraints_list.append(Q[0] - self.S0.imag)
-
-		# # Add temporary constraint to fix variables for the first 0.5 seconds
-		# for k in range(min(int(0.5/dt), N)):
-		# 	constraints_list.append(V_re[k] - V_traj_re[0, k])
-		# 	constraints_list.append(V_im[k] - V_traj_im[0, k])
-		# 	constraints_list.append(I_re[k] - I_traj_re[0, k])
-		# 	constraints_list.append(I_im[k] - I_traj_im[0, k])
-		# 	constraints_list.append(omega[k] - self.ws)
-		# 	constraints_list.append(Tm[k] - self.Pc)
-		# 	constraints_list.append(delta[k+1] - delta[k])
-		
-		# Dynamics constraints (trapezoidal rule)
-		for k in range(N - 1):
-			# delta_dot = omega - ws
-			f_delta_k = omega[k] - self.ws
-			f_delta_k1 = omega[k+1] - self.ws
-			constraints_list.append(delta[k+1] - delta[k] - (dt/2) * (f_delta_k + f_delta_k1))
-			
-			# omega_dot
-			E_k_re = self.E * ca.cos(delta[k] + self.delta0)
-			E_k_im = self.E * ca.sin(delta[k] + self.delta0)
-			Pe_k = E_k_re * I_re[k] + E_k_im * I_im[k]
-			
-			E_k1_re = self.E * ca.cos(delta[k+1] + self.delta0)
-			E_k1_im = self.E * ca.sin(delta[k+1] + self.delta0)
-			Pe_k1 = E_k1_re * I_re[k+1] + E_k1_im * I_im[k+1]
-			
-			f_omega_k = (Tm[k] - Pe_k - self.D*(omega[k]/self.ws - 1)) * self.ws/(2*self.H)
-			f_omega_k1 = (Tm[k+1] - Pe_k1 - self.D*(omega[k+1]/self.ws - 1)) * self.ws/(2*self.H)
-			constraints_list.append(omega[k+1] - omega[k] - (dt/2) * (f_omega_k + f_omega_k1))
-			
-			# Tm_dot
-			f_Tm_k = (-Tm[k] + Pc[k] - 1/self.R * (omega[k]/self.ws - 1)) / self.Tsv
-			f_Tm_k1 = (-Tm[k+1] + Pc[k+1] - 1/self.R * (omega[k+1]/self.ws - 1)) / self.Tsv
-			constraints_list.append(Tm[k+1] - Tm[k] - (dt/2) * (f_Tm_k + f_Tm_k1))
-		
-		# Algebraic constraints
-		for k in range(N):
-			E_k_re = self.E * ca.cos(delta[k] + self.delta0)
-			E_k_im = self.E * ca.sin(delta[k] + self.delta0)
-			# E - Zd*I - V = 0
-			alg_re = E_k_re - self.Zd.real * I_re[k] + self.Zd.imag * I_im[k] - V_re[k]
-			alg_im = E_k_im - self.Zd.real * I_im[k] - self.Zd.imag * I_re[k] - V_im[k]
-			constraints_list.append(alg_re)
-			constraints_list.append(alg_im)
-
-			# Add electrical power constraints
-			P_k = V_re[k] * I_re[k] + V_im[k] * I_im[k]
-			Q_k = V_im[k] * I_re[k] - V_re[k] * I_im[k]
-
-			constraints_list.append(P[k] - P_k)
-			constraints_list.append(Q[k] - Q_k)
-
-		# Terminal condition: enforce steady-state at final timestep
-		k = N - 1
-		f_delta_N = omega[k] - omega[k-1]
-		E_k_re = self.E * ca.cos(delta[k] + self.delta0)
-		E_k_im = self.E * ca.sin(delta[k] + self.delta0)
-		Pe_k = E_k_re * I_re[k] + E_k_im * I_im[k]
-		f_omega_N = (Tm[k] - Pe_k - self.D*(omega[k]/self.ws - 1)) * self.ws/(2*self.H)
-		f_Tm_N = (-Tm[k] + Pc[k] - 1/self.R * (omega[k]/self.ws - 1)) / self.Tsv
-
-		constraints_list.append(f_delta_N)   # omega[N-1] == ws
-		constraints_list.append(f_omega_N)   # Tm[N-1] == Pe at final step
-		constraints_list.append(f_Tm_N)      # Tm[N-1] at steady state
-
-		
-		constraints_vec = ca.vertcat(*constraints_list)
-
-		lbg = np.zeros(constraints_vec.shape[0])
-		ubg = np.zeros(constraints_vec.shape[0])
-
-		# Objective function: minimize ||w - trajectory||_2^2
-		obj = ca.sumsqr(V_re - V_traj_re) + ca.sumsqr(V_im - V_traj_im) + ca.sumsqr(I_re - I_traj_re) + ca.sumsqr(I_im - I_traj_im) + ca.sumsqr(omega - omega_traj) + ca.sumsqr(Tm - Tm_traj) + ca.sumsqr(delta - delta_traj) + ca.sumsqr(P - P_traj) + ca.sumsqr(Q - Q_traj) + ca.sumsqr(Pc - Pc_traj)
-
-
-		opts = {
-			'ipopt.print_level': 5, # 0 for silent, 5 for detailed output
-			'ipopt.tol': 1e-3,
-			'ipopt.max_iter': 500,
-			'ipopt.acceptable_tol': 1e-5,
-			'ipopt.acceptable_iter': 10,
-			'ipopt.mu_strategy': 'adaptive',
-			'ipopt.nlp_scaling_method': 'gradient-based',
-			'ipopt.alpha_for_y': 'min-dual-infeas',
-			'ipopt.recalc_y': 'yes'
-		}
-
-		# Create NLP solver (requires dense vector x)
-		nlp_solver = ca.nlpsol('nlp_solver', 'ipopt', {'f': obj, 'g': constraints_vec, 'x': x}, opts)
-
-		# Initial guess - improved initialization
-		# Start with measurement data and gradually adjust
-		delta_guess = np.zeros_like(V_traj_re[0, :])  # Start with zero angle deviations
-		omega_guess = np.ones((N,)) * self.ws
-		Tm_guess = np.ones((N,)) * self.Pc
-		V_re_guess = V_traj_re.flatten()
-		V_im_guess = V_traj_im.flatten()
-		I_re_guess = I_traj_re.flatten()
-		I_im_guess = I_traj_im.flatten()
-		P_guess = P_traj.flatten()
-		Q_guess = Q_traj.flatten()
-		Pc_guess = Pc_traj.flatten()
-
-		x_init = np.column_stack([delta_guess, omega_guess, Tm_guess, V_re_guess, V_im_guess, I_re_guess, I_im_guess, P_guess, Q_guess, Pc_guess])
-		initial_guess = x_init.flatten()
-
-		lbx = np.full((N, n_vars), -np.inf)
-		ubx = np.full((N, n_vars), np.inf)
-		lbx[:, 1] = self.ws - 0.08
-		ubx[:, 1] = self.ws + 0.08
-		lbx[:, 9] = self.Pc_min
-		ubx[:, 9] = self.Pc_max
-
-		# Solve NLP
-		print("Solving NLP...")
-		sol = nlp_solver(x0=initial_guess, lbg=lbg, ubg=ubg, lbx=lbx.flatten(), ubx=ubx.flatten())
-
-		# Extract solution and reshape back to 2D form
-		sol_x_flat = sol['x'].full().flatten()
-		sol_x = sol_x_flat.reshape((N, n_vars)).T
-
-		sol_delta = sol_x[0, :].reshape(1, -1)
-		sol_omega = sol_x[1, :].reshape(1, -1)
-		sol_Tm = sol_x[2, :].reshape(1, -1)
-		sol_V_re = sol_x[3, :]
-		sol_V_im = sol_x[4, :]
-		sol_I_re = sol_x[5, :]
-		sol_I_im = sol_x[6, :]
-		sol_V = (sol_V_re + 1j*sol_V_im).reshape(1, -1)
-		sol_I = (sol_I_re + 1j*sol_I_im).reshape(1, -1)
-		sol_P = sol_x[7, :].reshape(1, -1)
-		sol_Q = sol_x[8, :].reshape(1, -1)
-		sol_S = (sol_P + 1j * sol_Q)
-		sol_Pc = sol_x[9, :].reshape(1, -1)
-
-		# # Plot omega
-		# fig, axs = plt.subplots(1, 1, figsize=(10, 5))
-		# axs.plot(np.arange(N)*dt, sol_omega[0, :], label='Projected Omega')
-		# axs.axhline(self.ws, color='r', linestyle='--', label='Synchronous Speed')
-		# axs.set_title('Projected Rotor Speed (Omega)')
-		# axs.set_xlabel('Time (s)')
-		# axs.set_ylabel('Omega (rad/s)')
-		# axs.set_ylim(self.ws - 0.08, self.ws + 0.08)
-		# axs.legend()
-		# plt.grid()
-		# plt.show()
-
-		# # Plot voltage
-		# fig, axs = plt.subplots(1, 1, figsize=(10, 5))
-		# axs.plot(np.arange(N)*dt, sol_V_re, label='Projected V_re')
-		# axs.plot(np.arange(N)*dt, sol_V_im, label='Projected V_im')
-		# axs.set_title('Projected Voltage')
-		# axs.set_xlabel('Time (s)')
-		# axs.set_ylabel('Voltage (V)')
-		# axs.legend()
-		# plt.grid()
-		# plt.show()
-
-		ret.set_var_names(["voltage"], sol_V)
-		ret.set_var_names(["current"], sol_I)
-		ret.set_var_names(["delta"], sol_delta)
-		ret.set_var_names(["omega"], sol_omega)
-		ret.set_var_names(["Tm"], sol_Tm)
-		ret.set_var_names(["power"], sol_S)
-		ret.set_var_names(["Pc"], sol_Pc)
-
-		return ret
-	
-	def f(self, x):
-		delta = x[0]
-		omega = x[1]
-		Tm = x[2]
-		V_re = x[3]
-		V_im = x[4]
-		I_re = x[5]
-		I_im = x[6]
-
-		E_re = self.E * ca.cos(delta + self.delta0)
-		E_im = self.E * ca.sin(delta + self.delta0)
-		Pe = E_re * I_re + E_im * I_im
-
-		delta_dot = omega - self.ws
-		omega_dot = (Tm - Pe - self.D*(omega/self.ws - 1)) * self.ws/(2*self.H)
-		Tm_dot = (-Tm + self.Pc - 1/self.R * (omega/self.ws - 1)) / self.Tsv
-		alg_re = E_re - self.Zd.real * I_re + self.Zd.imag * I_im - V_re
-		alg_im = E_im - self.Zd.real * I_im - self.Zd.imag * I_re - V_im
-
-		return ca.vertcat(delta_dot, omega_dot, Tm_dot, alg_re, alg_im)
-	
-	def ae(self, x):
-		delta = x[0]
-		omega = x[1]
-		Tm = x[2]
-		V_re = x[3]
-		V_im = x[4]
-		I_re = x[5]
-		I_im = x[6]
-
-		E_re = self.E * ca.cos(delta + self.delta0)
-		E_im = self.E * ca.sin(delta + self.delta0)
-		
-		alg_re = E_re - self.Zd.real * I_re + self.Zd.imag * I_im - V_re
-		alg_im = E_im - self.Zd.real * I_im - self.Zd.imag * I_re - V_im
-
-		return ca.vertcat(alg_re, alg_im)
-
-class ConstPowerLoad(Projectable):
-	"""
-	A class implementing projections onto the behaviour of a constant power load
-	"""
-
-	def __init__(self, S: Callable[[float], complex], max_iter=20, tol=1e-5):
-		self.S = S
-		self.max_iter = max_iter
-		self.tol = tol
-
-
-	def project(self, trajectory: Trajectory) -> Trajectory:
-		ret = trajectory.copy()
-		for n in range(ret.N):
-			V0 = ret.w["voltage"][:, [n]]
-			I0 = ret.w["current"][:, [n]]
-
-			s = self.S(n * ret.dt)
-
-			# Precompute constants for the objective function
-			A = (np.abs(V0)**2).item()
-			B = (np.abs(I0)**2).item()
-			C = (2 * np.real(np.conj(s) * V0 * np.conj(I0))).item()
-			abs_s = np.abs(s)
-
-			# 1D Objective function based on the magnitude r = |i|.
-			# This mirrors the scalar reduction approach in the paper.
-			def objective(r):
-				# W_mag represents the magnitude of the optimally phase-aligned vector
-				W_mag = np.sqrt(B * r**2 + A * (abs_s**2) / r**2 + C)
-				# The simplified distance function
-				return r**2 + (abs_s**2) / r**2 - 2 * W_mag
-
-			# Find the optimal magnitude r > 0.
-			res = minimize_scalar(objective, bounds=(1e-6, 1e6), method='bounded')
-			r_opt = res.x # type: ignore
-
-			# Compute the optimal complex phase alignment vector W
-			W = (np.conj(s) / r_opt) * V0 + r_opt * I0
-			W_mag = np.abs(W)
-
-			# Handle the edge case where W is perfectly zero
-			if W_mag.item() < 1e-12:
-				phase = 1.0 + 0j
-			else:
-				phase = W / W_mag
-
-			# Reconstruct the final projected complex values
-			final_i = r_opt * phase
-			final_v = (s / r_opt) * phase
-
-			ret.w["voltage"][:, n] = final_v.ravel()
-			ret.w["current"][:, n] = final_i.ravel()
-			ret.w["power"][:, n] = s
-
-		return ret
-
-class BusBehaviours(Projectable):
-	def __init__(self, gens: list[Generator], loads: list[ConstPowerLoad]):
-		self.gens = gens
-		self.loads = loads
-
-	def project(self, trajectory: Trajectory) -> Trajectory:
-		ret = trajectory.copy()
-		for i, gen in enumerate(self.gens):
-			print(f"Projecting onto generator {i+1}/{len(self.gens)}")
-			gen_vars = ["voltage", "current", "delta", "omega", "Tm", "power", "Pc"]
-			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in gen_vars})
-			for v in gen_vars:
-				t.w[v] = trajectory.w[v][[i], :]
-			projected_t = gen.project(t)
-			for v in gen_vars:
-				ret.w[v][[i], :] = projected_t.w[v]
-		for i, load in enumerate(self.loads, start=len(self.gens)):
-			print(f"Projecting onto load {i+1}/{len(self.loads)}")
-			load_vars = ["voltage", "current", "power"]
-			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in load_vars})
-			for v in load_vars:
-				t.w[v] = trajectory.w[v][[i], :]
-			projected_t = load.project(t)
-			for v in load_vars:
-				ret.w[v][[i], :] = projected_t.w[v]
-		return ret
-
-class BusBehavioursParallel(Projectable):
-	def __init__(self, gens: list[Generator], loads: list[ConstPowerLoad]):
-		self.gens = gens
-		self.loads = loads
-
-	def project(self, trajectory: Trajectory) -> Trajectory:
-		ret = trajectory.copy()
-
-		def project_gen(args):
-			i, gen = args
-			print(f"Projecting onto generator {i+1}/{len(self.gens)}")
-			gen_vars = ["voltage", "current", "delta", "omega", "Tm", "power", "Pc"]
-			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in gen_vars})
-			for v in gen_vars:
-				t.w[v] = trajectory.w[v][[i], :]
-			projected_t = gen.project(t)
-			return i, gen_vars, projected_t
-
-		def project_load(args):
-			i, load = args
-			print(f"Projecting onto load {i+1}/{len(self.loads)}")
-			load_vars = ["voltage", "current", "power"]
-			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in load_vars})
-			for v in load_vars:
-				t.w[v] = trajectory.w[v][[i], :]
-			projected_t = load.project(t)
-			return i, load_vars, projected_t
-
-		from concurrent.futures import ThreadPoolExecutor
-		gen_args = list(enumerate(self.gens))
-		load_args = [(i + len(self.gens), load) for i, load in enumerate(self.loads)]
-
-		with ThreadPoolExecutor() as executor:
-			gen_futures = executor.map(project_gen, gen_args)
-			load_futures = executor.map(project_load, load_args)
-			for i, vars_, projected_t in gen_futures:
-				for v in vars_:
-					ret.w[v][[i], :] = projected_t.w[v]
-			for i, vars_, projected_t in load_futures:
-				for v in vars_:
-					ret.w[v][[i], :] = projected_t.w[v]
-
-		return ret
-
-
-class Solvable(ABC):
-	"""
-	An abstract base class representing an optimization problem parameterized by a trajectory, where the solution is a trajectory that satisfies certain constraints.
-
-	Methods
-	-------
-	solve(trajectory: Trajectory) -> Trajectory
-		Solves the optimization problem for the given trajectory.
-	"""
-
-	@abstractmethod
-	def solve(self, t: Trajectory) -> Trajectory:
-		pass
-
-class Objective(Solvable):
-	"""
-	A class reprsenting the minimization of generation cost subject to operational constraints and linear network behaviour
-	"""
-
-	def __init__(self, Ybus, gen_costs, P_min, P_max, V_max, t: Trajectory, rho=1.0):
-		self.Ybus = Ybus
-		self.gen_costs = gen_costs
-		self.N = t.N
-		self.g = len(gen_costs)
-		self.num_buses = Ybus.shape[0]
-
-		self.rho = rho
-
-		P_min = np.array(P_min).reshape(-1, 1)
-		P_max = np.array(P_max).reshape(-1, 1)
-		V_max = np.array(V_max).reshape(-1, 1)
-
-
-		self.V = cp.Variable((Ybus.shape[0], self.N), complex=True)
-		self.I = cp.Variable((Ybus.shape[0], self.N), complex=True)
-		self.S = cp.Variable((self.g, self.N), complex=True)
-		self.Pc_var = cp.Variable((self.g, self.N))
-		self.Vw = cp.Parameter(self.V.shape, complex=True)
-		self.Iw = cp.Parameter(self.I.shape, complex=True)
-		self.Sw = cp.Parameter(self.S.shape, complex=True)
-		self.Pcw = cp.Parameter((self.g, self.N))
-
-		self.x = cp.vstack([self.V, self.I, self.S])
-		self.w = cp.vstack([self.Vw, self.Iw, self.Sw])
-
-		# TODO Reevaluate this since it might be wrong
-		# Self.cost = sum over each generator and each timestep of real(S_i)^2 * gen_costs[i]
-		self.cost = cp.sum([cp.quad_over_lin(cp.real(self.S[i, :]), 1/self.gen_costs[i]) for i in range(self.g)])
-
-		# Self.penalty = rho * ||x-w||_2^2, recalling that these are complex numbers
-		self.penalty = self.rho * cp.sum_squares(self.x - self.w)
-		self.Pc_penalty = self.rho * cp.sum_squares(self.Pc_var - self.Pcw)
-
-		self.constraints = [self.Ybus @ self.V == self.I]
-		self.constraints.append(cp.real(self.S) >= P_min)
-		self.constraints.append(cp.real(self.S) <= P_max)
-		self.constraints.append(cp.abs(self.V) <= V_max)
-		self.constraints.append(self.Pc_var >= P_min)
-		self.constraints.append(self.Pc_var <= P_max)
-
-		# TODO Add line current limits
-
-		self.problem = cp.Problem(cp.Minimize(self.cost + self.penalty + self.Pc_penalty), self.constraints)
-		
-
-
-	def solve(self, t: Trajectory) -> Trajectory:
-		self.Vw.value = t.get_var_names(["voltage"])
-		self.Iw.value = t.get_var_names(["current"])
-		self.Sw.value = t.get_var_names(["power"])[:self.g, :]
-		self.Pcw.value = np.real(t.get_var_names(["Pc"]))
-
-		self.problem.solve()
-
-		# Extract solution and return a trajectory
-		ret = t.copy()
-
-		if self.V.value is not None:
-			ret.set_var_names(["voltage"], self.V.value)
-		if self.I.value is not None:
-			ret.set_var_names(["current"], self.I.value)
-		if self.S.value is not None:
-			ret.w["power"][:self.g, :] = self.S.value
-		if self.Pc_var.value is not None:
-			ret.w["Pc"][:self.g, :] = self.Pc_var.value
-
-		if self.problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-			print(f"Optimization failed with status {self.problem.status}")
-
-		return ret
-
-
-class Trajectory:
-	"""
-	A class representing a trajectory with time points and corresponding states.
-
-	Parameters
-	----------
-	T : int
-		Time horizon of the trajectory.
-	vars: dict
-		A dictionary mapping variable names to their dimensions.
-	"""
-
-	def __init__(self, T: float, dt: float, vars: dict):
-		self.T = T
-		self.dt = dt
-		self.N = int(T / dt)
-		self.vars = vars
-		self.q = sum(vars.values())
-		self.w = {key: np.zeros((size, self.N), dtype=np.complex64) for key, size in vars.items()}
-
-	def get_var_names(self, var_names: list[str], idx=None) -> np.ndarray:
-		"""
-		Returns the submatrix corresponding to the given variable names.
-		
-		Parameters
-		----------
-		var_names : list[str]
-			The names of the variables to extract.
-		idx : list[int], optional
-			The indices of the rows to extract for each variable. If None, extracts all rows.
-		"""
-
-		if not var_names:
-			return np.array([], dtype=np.complex64).reshape(0, self.N)
-
-		if idx is None:
-			sub_trajectories = [self.w[var_name] for var_name in var_names]
-		else:
-			sub_trajectories = [self.w[var_name][idx, :] for var_name in var_names]
-
-		return np.vstack(sub_trajectories)
-
-	def set_var_names(self, var_names: list[str], values: np.ndarray, idx=None) -> None:
-		"""
-		Sets the sub-trajectories for the given variable names.
-		
-		Parameters
-		----------
-		var_names : list[str]
-			The names of the variables to set.
-		values : np.ndarray
-			The values to set for the specified variables.
-		idx : list[int], optional
-			The indices of the rows to set for each variable. If None, sets all rows.
-		"""
-
-		if not var_names:
-			return
-
-		start_row = 0
-		for var_name in var_names:
-			size = self.vars[var_name]
-			if idx is None:
-				self.w[var_name] = values[start_row:start_row+size, :]
-			else:
-				self.w[var_name][idx, :] = values[start_row:start_row+size, :]
-			start_row += size
-
-	def set_constant(self, var_names: list[str], value, idx=None) -> None:
-		"""
-		Sets the specified variables to a constant value.
-
-		Parameters
-		----------
-		var_name : list[str]
-			The names of the variables to set.
-		value : scalar or np.ndarray
-			The constant value to set the variables to.
-		idx : list[int], optional
-			The indices of the rows to set. If None, sets all rows.
-		"""
-		for var_name in var_names:
-			# Convert value to numpy array and reshape if needed for broadcasting
-			val = np.asarray(value)
-			if val.ndim == 1:
-				val = val.reshape(-1, 1)  # Shape (n,) -> (n, 1) for proper broadcasting
-			
-			if idx is None:
-				self.w[var_name][:, :] = val
-			else:
-				self.w[var_name][idx, :] = val
-
-	def __add__(self, other):
-		if not isinstance(other, Trajectory):
-			return NotImplemented
-		if self.N != other.N or self.vars != other.vars:
-			raise ValueError("Trajectories must have the same dimensions and variables for addition.")
-		result = Trajectory(self.T, self.dt, self.vars)
-		for var_name in self.vars:
-			result.w[var_name] = self.w[var_name] + other.w[var_name]
-		return result
-	
-	def __sub__(self, other):
-		if not isinstance(other, Trajectory):
-			return NotImplemented
-		if self.N != other.N or self.vars != other.vars:
-			raise ValueError("Trajectories must have the same dimensions and variables for subtraction.")
-		result = Trajectory(self.T, self.dt, self.vars)
-		for var_name in self.vars:
-			result.w[var_name] = self.w[var_name] - other.w[var_name]
-		return result
-	
-	def __mul__(self, scalar):
-		result = Trajectory(self.T, self.dt, self.vars)
-		for var_name in self.vars:
-			result.w[var_name] = self.w[var_name] * scalar
-		return result
-
-	def __rmul__(self, scalar):
-		return self.__mul__(scalar)
-
-	def copy(self):
-		"""
-		Returns a deep copy of the trajectory.
-		
-		Returns
-		-------
-		Trajectory
-			A new trajectory with the same dimensions and data.
-		"""
-		result = Trajectory(self.T, self.dt, self.vars)
-		result.w = {key: value.copy() for key, value in self.w.items()}
-		return result
-	
-	def norm(self):
-		# Concatenate all variable trajectories into a single array and compute the norm
-		all_vars = np.vstack(list(self.w.values()))
-		return np.linalg.norm(all_vars)
 
 def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0, threshold=1e-3, max_iterations=100, callback=None):
 	"""
@@ -764,67 +87,68 @@ def test_const_load_projection_refactored():
 			f"Power constraint violated at t={k}: {computed_power[0,k]} != {S}"
 	print("test_const_load_projection_refactored PASSED")
 
-def run_admm_feasibility_test(num_buses: int = 24):
-	assert num_buses % 2 == 0, "num_buses must be even"
-	omega_s = 2*np.pi*60
-	n_buses = num_buses
-	n_gens = n_loads = num_buses // 2
 
-	# Identical generator parameters
-	H, D, RD, X_p, Tsv = 8, 0, 0.04, 0.0608, 2
+def admm_test(n_buses: int = 24, seq_and_parallel=True):
+	assert n_buses % 2 == 0, "n_buses must be even"
+	
+	# Initialize system parameters
+	sys_params = SysParams(n_buses)
+	n_buses = sys_params.n_buses
+	n_gens = sys_params.n_gens
+	n_loads = sys_params.n_loads
+	omega_s = sys_params.omega_s
 
-	# Initial bus voltages: gen buses slightly above 1 pu, load buses slightly below
-	theta_gens  = np.linspace(0.0, -2.0, n_gens)  * np.pi / 180
-	theta_loads = np.linspace(-6.0, -8.0, n_loads) * np.pi / 180
-	V_init = np.concatenate([
-		1.04 * np.exp(1j * theta_gens),
-		0.99 * np.exp(1j * theta_loads),
+	# Solve static OPF to get feasible initial conditions
+	print("Solving static OPF for initial conditions...")
+	opf_sol = solve_opf(sys_params)
+	print(f"OPF solved with status: {opf_sol['status']}")
+
+	# Extract initial conditions from OPF solution
+	S_gen0 = sys_params.S_gen0
+	S_load0 = sys_params.S_load0
+	S_init = np.concatenate([
+		np.full(n_gens, S_gen0),
+		np.full(n_loads, S_load0)
 	])
+	ic = ic_from_opf(opf_sol, sys_params, S_init)
 
-	# Balanced power injections: each gen +0.4+0.08j, each load -0.4-0.08j
-	S_gen0  =  0.40 + 0.08j
-	S_load0 = -0.40 - 0.08j
-	S_init  = np.concatenate([np.full(n_gens, S_gen0), np.full(n_loads, S_load0)])
-	I_init  = np.conj(S_init / V_init)
+	# Verify IC feasibility
+	V_opf = ic['voltage']
+	I_opf = ic['current']
+	Ybus = sys_params.Ybus
+	kcl_residual = np.linalg.norm(Ybus @ V_opf - I_opf)
+	print(f"IC KCL residual: {kcl_residual:.4e}")
+	assert kcl_residual < 1e-3, f"OPF solution does not satisfy KCL: residual = {kcl_residual}"
+
+	power_residual = np.linalg.norm(ic['power'][:n_gens] - ic['S'])
+	print(f"Power residual: {power_residual:.4e}")
+	assert power_residual < 1e-3, f"OPF solution does not match expected power injections: residual = {power_residual}"
 
 	# Load disturbance at t=0.5s: each load shifts real power by dP in [-0.2, +0.2]
 	rng = np.random.default_rng(42)
-	dP_loads    = rng.uniform(-0.2, 0.2, n_loads)
+	dP_loads    = np.zeros(n_loads) #rng.uniform(-0.2, 0.2, n_loads)
 	P_load_post = np.real(S_load0) + dP_loads
 	Q_load0     = np.imag(S_load0)
 
-	# Ybus: two rings (gen 0..n_gens-1, load n_gens..n_buses-1) + cross-links
-	# Each bus has degree 3 -> sparse but fully connected
-	half = n_gens // 2
-	branches = (
-		[(i, (i+1) % n_gens) for i in range(n_gens)] +                              # generator ring
-		[(n_gens + i, n_gens + (i+1) % n_loads) for i in range(n_loads)] +          # load ring
-		[(i, n_gens + (2*i) % n_loads) for i in range(half)] +                      # cross-links (first half)
-		[(half + i, n_gens + (2*i+1) % n_loads) for i in range(half)]               # cross-links (second half)
-	)
-	y_line   = 1.0 / (0.01 + 0.085j)
-	ysh_line = 0.044j
-	Ybus = np.zeros((n_buses, n_buses), dtype=complex)
-	for bi, bj in branches:
-		Ybus[bi, bi] += y_line + ysh_line
-		Ybus[bj, bj] += y_line + ysh_line
-		Ybus[bi, bj] -= y_line
-		Ybus[bj, bi] -= y_line
+	# Extract generator parameters for instantiation
+	H = sys_params.H
+	D = sys_params.D
+	Tsv = sys_params.Tsv
+	RD = sys_params.Rd
+	X_p = sys_params.X_p
+	P_min = sys_params.P_min
+	P_max = sys_params.P_max
+	V_max = sys_params.V_max
+	gen_costs = sys_params.gen_costs
 
-	# Generator EMF from initial V and I
-	E_complex = V_init[:n_gens] + 1j * X_p * I_init[:n_gens]
-	E_mags    = np.abs(E_complex)
-	delta0s   = np.angle(E_complex)
-	PC_each   = np.real(S_gen0)
-
-	gen_costs = [1.0] * n_gens
-	P_min = np.full(n_gens, 0.1)
-	P_max = np.full(n_gens, 1.0)
-	V_max = np.concatenate([np.full(n_gens, 1.2), np.full(n_loads, 1.15)])
-
+	# Compute E_mags for Generator instantiation (from OPF IC)
+	E_complex = ic['voltage'][:n_gens] + 1j * X_p * ic['current'][:n_gens]
+	E_mags = np.abs(E_complex)
+	delta0s = ic['delta']
 	gens = [
-		Generator(E_mags[i], 1j*X_p, H, D, Tsv, RD, delta0s[i], PC_each,
-		          V_init[i], I_init[i], S_init[i], Pc_min=P_min[i], Pc_max=P_max[i])
+		Generator(E_mags[i], 1j*X_p, H, D, Tsv, RD, delta0s[i], ic['Tm'][i],
+		          ic['voltage'][i], ic['current'][i], ic['power'][i], 
+		          Pc_min=P_min[i], Pc_max=P_max[i])
 		for i in range(n_gens)
 	]
 	loads = [
@@ -836,17 +160,18 @@ def run_admm_feasibility_test(num_buses: int = 24):
 	]
 
 	def make_initial_traj():
-		t = Trajectory(5.0, 0.01, {
+		t = Trajectory(0.2, 0.01, {
 			"voltage": n_buses, "current": n_buses, "power": n_buses,
 			"delta": n_gens, "omega": n_gens, "Tm": n_gens, "Pc": n_gens,
 		})
-		t.set_constant(["voltage"], list(V_init))
-		t.set_constant(["current"], list(I_init))
-		t.set_constant(["delta"],   list(delta0s))
-		t.set_constant(["omega"],   [omega_s] * n_gens)
-		t.set_constant(["Tm"],      [PC_each]  * n_gens)
-		t.set_constant(["power"],   list(S_init))
-		t.set_constant(["Pc"],      [PC_each]  * n_gens)
+		# Use OPF-derived initial conditions
+		t.set_constant(["voltage"], list(ic['voltage']))
+		t.set_constant(["current"], list(ic['current']))
+		t.set_constant(["delta"],   list(ic['delta']))
+		t.set_constant(["omega"],   list(ic['omega']))
+		t.set_constant(["Tm"],      list(ic['Tm']))
+		t.set_constant(["power"],   list(ic['power']))
+		t.set_constant(["Pc"],      list(ic['Pc']))
 		return t
 
 	log = logging.getLogger("admm_benchmark")
@@ -865,10 +190,12 @@ def run_admm_feasibility_test(num_buses: int = 24):
 		return cb
 
 	log.info("Number of Buses: " + str(n_buses))
-	for label, Bi in [
-		("BusBehaviours (sequential)", BusBehaviours(gens, loads)),
-		("BusBehavioursParallel (threaded)", BusBehavioursParallel(gens, loads)),
-	]:
+	test_cases = []
+	if seq_and_parallel:
+		test_cases.append(("BusBehaviours (sequential)", BusBehaviours(gens, loads)))
+	test_cases.append(("BusBehavioursParallel (threaded)", BusBehavioursParallel(gens, loads)))
+	
+	for label, Bi in test_cases:
 		initial_traj = make_initial_traj()
 		obj = Objective(Ybus, gen_costs, P_min, P_max, V_max, initial_traj)
 		residuals = []
@@ -880,14 +207,20 @@ def run_admm_feasibility_test(num_buses: int = 24):
 		log.info(f"{label}: {elapsed:.3f}s over {len(residuals)} iteration(s), final residual = {residuals[-1]:.4e}")
 		print(f"  -> {elapsed:.3f}s")
 
-	log.info(
-		f"Speedup (sequential / parallel): "
-		f"{timing_results['BusBehaviours (sequential)']['time'] / timing_results['BusBehavioursParallel (threaded)']['time']:.2f}x"
-	)
+	if seq_and_parallel:
+		log.info(
+			f"Speedup (sequential / parallel): "
+			f"{timing_results['BusBehaviours (sequential)']['time'] / timing_results['BusBehavioursParallel (threaded)']['time']:.2f}x"
+		)
 	print(f"\nBenchmark results logged to admm_benchmark.log")
 
-	sol = timing_results["BusBehaviours (sequential)"]["result"]
-	primal_residuals = timing_results["BusBehaviours (sequential)"]["residuals"]
+	# Select solution from sequential test if available, otherwise from parallel test
+	if seq_and_parallel and "BusBehaviours (sequential)" in timing_results:
+		sol = timing_results["BusBehaviours (sequential)"]["result"]
+		primal_residuals = timing_results["BusBehaviours (sequential)"]["residuals"]
+	else:
+		sol = timing_results["BusBehavioursParallel (threaded)"]["result"]
+		primal_residuals = timing_results["BusBehavioursParallel (threaded)"]["residuals"]
 
 	t_vec  = np.arange(sol.N) * sol.dt
 	V_mag  = np.abs(sol.w["voltage"])
@@ -1008,9 +341,9 @@ if __name__ == "__main__":
 		with open("admm_times.pkl", "rb") as f:
 			times = pickle.load(f)
 
-	nbuses = 12
+	nbuses = 4
 
-	timing_results = run_admm_feasibility_test(num_buses=nbuses)
+	timing_results = admm_test(n_buses=nbuses, seq_and_parallel=False)
 	times[nbuses] = timing_results
 
 	# Save times dict to file

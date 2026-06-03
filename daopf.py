@@ -5,20 +5,16 @@ import casadi as ca
 import matplotlib.pyplot as plt
 import time
 import logging
-from saap import Trajectory, Generator, ConstPowerLoad
+from saap import Trajectory, Generator, ConstPowerLoad, SysParams
+from OPF import solve_opf, ic_from_opf
 
 
 def solve_daopf(
-    Ybus: np.ndarray,
     gens: list,
     loads: list,
     load_buses: list,
-    gen_costs: list,
-    P_min: np.ndarray,
-    P_max: np.ndarray,
-    V_max: np.ndarray,
-    T: float,
-    dt: float,
+    sys_params: SysParams,
+    ic: dict[str, np.ndarray],
 ) -> Trajectory:
     """
     Solves the dynamics-aware OPF as a single monolithic NLP using CasADI/IPOPT.
@@ -30,11 +26,19 @@ def solve_daopf(
       omega_i     : (N,)          rotor speed per generator
       Tm_i        : (N,)          mechanical torque per generator
     """
-    N = int(T / dt)
-    n_buses = Ybus.shape[0]
-    n_gens = len(gens)
-    n_loads = len(loads)
-    ws = 2 * np.pi * 60
+    P_min = sys_params.P_min
+    P_max = sys_params.P_max
+    V_max = sys_params.V_max
+    gen_costs = sys_params.gen_costs
+    n_buses = sys_params.n_buses
+    
+    T = sys_params.T
+    dt = sys_params.dt
+    N = sys_params.N
+    n_gens = sys_params.n_gens
+    n_loads = sys_params.n_loads
+    omega_s = sys_params.omega_s
+    Ybus = sys_params.Ybus
 
     Ybus_re = np.real(Ybus)
     Ybus_im = np.imag(Ybus)
@@ -82,8 +86,8 @@ def solve_daopf(
 
     lbx_delta = [np.full(N, -np.inf) for _ in range(n_gens)]
     ubx_delta = [np.full(N,  np.inf) for _ in range(n_gens)]
-    lbx_omega = [np.full(N, ws - 0.08) for _ in range(n_gens)]
-    ubx_omega = [np.full(N, ws + 0.08) for _ in range(n_gens)]
+    lbx_omega = [np.full(N, omega_s - 0.08) for _ in range(n_gens)]
+    ubx_omega = [np.full(N, omega_s + 0.08) for _ in range(n_gens)]
     lbx_Tm    = [np.full(N, -np.inf) for _ in range(n_gens)]
     ubx_Tm    = [np.full(N,  np.inf) for _ in range(n_gens)]
     lbx_Pc    = [np.full(N, P_min_arr[i]) for i in range(n_gens)]
@@ -143,14 +147,17 @@ def solve_daopf(
 
         # Initial conditions (V/I at t=0 are determined by KCL + algebraic + load)
         eq(delta[0])
-        eq(omega[0] - ws)
+        eq(omega[0] - omega_s)
         eq(Tm[0] - gen.Pc)
+
+        # Terminal conditions (omega=omega_s at t=T)
+        # eq(omega[-1] - omega_s)
 
         # ODE: trapezoidal rule for k = 0..N-2
         for k in range(N - 1):
-            # --- delta_dot = omega - ws ---
-            f_d_k  = omega[k]   - ws
-            f_d_k1 = omega[k+1] - ws
+            # --- delta_dot = omega - omega_s ---
+            f_d_k  = omega[k]   - omega_s
+            f_d_k1 = omega[k+1] - omega_s
             eq(delta[k+1] - delta[k] - (dt/2) * (f_d_k + f_d_k1))
 
             # --- omega_dot ---
@@ -162,13 +169,13 @@ def solve_daopf(
             Pe_k  = E_re_k  * I_re[bus, k]   + E_im_k  * I_im[bus, k]
             Pe_k1 = E_re_k1 * I_re[bus, k+1] + E_im_k1 * I_im[bus, k+1]
 
-            f_o_k  = (Tm[k]   - Pe_k  - gen.D * (omega[k]   / ws - 1)) * ws / (2 * gen.H)
-            f_o_k1 = (Tm[k+1] - Pe_k1 - gen.D * (omega[k+1] / ws - 1)) * ws / (2 * gen.H)
+            f_o_k  = (Tm[k]   - Pe_k  - gen.D * (omega[k]   / omega_s - 1)) * omega_s / (2 * gen.H)
+            f_o_k1 = (Tm[k+1] - Pe_k1 - gen.D * (omega[k+1] / omega_s - 1)) * omega_s / (2 * gen.H)
             eq(omega[k+1] - omega[k] - (dt/2) * (f_o_k + f_o_k1))
 
             # --- Tm_dot ---
-            f_T_k  = (-Tm[k]   + Pc[k]   - (1/gen.R) * (omega[k]   / ws - 1)) / gen.Tsv
-            f_T_k1 = (-Tm[k+1] + Pc[k+1] - (1/gen.R) * (omega[k+1] / ws - 1)) / gen.Tsv
+            f_T_k  = (-Tm[k]   + Pc[k]   - (1/gen.R) * (omega[k]   / omega_s - 1)) / gen.Tsv
+            f_T_k1 = (-Tm[k+1] + Pc[k+1] - (1/gen.R) * (omega[k+1] / omega_s - 1)) / gen.Tsv
             eq(Tm[k+1] - Tm[k] - (dt/2) * (f_T_k + f_T_k1))
 
         # Algebraic: E - Zd*I - V = 0 at every timestep
@@ -190,7 +197,7 @@ def solve_daopf(
             Q_load = s.imag
             # Re(V * conj(I)) = P_load
             eq(V_re[bus, k] * I_re[bus, k] + V_im[bus, k] * I_im[bus, k] - P_load)
-            # Im(V * conj(I)) = Q_load  [Im(V*conj(I)) = V_im*I_re - V_re*I_im]
+            # Im(V * conj(I)) = Q_load
             eq(V_im[bus, k] * I_re[bus, k] - V_re[bus, k] * I_im[bus, k] - Q_load)
 
     # 4. Generation limits: P_min <= Re(V*conj(I)) <= P_max  per generator bus
@@ -208,6 +215,12 @@ def solve_daopf(
         for k in range(N):
             V_sq = V_re[bus, k]**2 + V_im[bus, k]**2
             ineq_ub(V_sq, V_max[bus]**2)
+    V_min = 0.8  # per-unit minimum voltage magnitude
+    for bus in range(n_buses):
+        for k in range(N):
+            V_sq = V_re[bus, k]**2 + V_im[bus, k]**2
+            ineq_lb(V_sq, V_min**2)
+
 
     g = ca.vertcat(*g_list)
     lbg = np.concatenate(lbg_list)
@@ -225,28 +238,27 @@ def solve_daopf(
     # ------------------------------------------------------------------ #
     # Warm start: steady-state initial conditions
     # ------------------------------------------------------------------ #
-    V_re0 = np.tile(np.array([g.V0.real for g in gens] +
-                              [0.0] * n_loads).reshape(-1, 1), (1, N))
-    V_im0 = np.tile(np.array([g.V0.imag for g in gens] +
-                              [0.0] * n_loads).reshape(-1, 1), (1, N))
-    I_re0 = np.tile(np.array([g.I0.real for g in gens] +
-                              [0.0] * n_loads).reshape(-1, 1), (1, N))
-    I_im0 = np.tile(np.array([g.I0.imag for g in gens] +
-                              [0.0] * n_loads).reshape(-1, 1), (1, N))
-
-    x0_parts = [V_re0.flatten(), V_im0.flatten(),
-                I_re0.flatten(), I_im0.flatten()]
-    for i, gen in enumerate(gens):
-        x0_parts += [np.zeros(N), np.full(N, ws), np.full(N, gen.Pc), np.full(N, gen.Pc)]
+    V_re0 = np.tile(np.real(ic['voltage']).reshape(-1, 1), (1, N))
+    V_im0 = np.tile(np.imag(ic['voltage']).reshape(-1, 1), (1, N))
+    I_re0 = np.tile(np.real(ic['current']).reshape(-1, 1), (1, N))
+    I_im0 = np.tile(np.imag(ic['current']).reshape(-1, 1), (1, N))
+    x0_parts = [V_re0.flatten(), V_im0.flatten(), I_re0.flatten(), I_im0.flatten()]
+    for i in range(n_gens):
+        x0_parts += [
+            np.zeros(N),                    # delta deviation: 0 at t=0 per IC constraint
+            np.full(N, ic['omega'][i]),
+            np.full(N, ic['Tm'][i]),
+            np.full(N, ic['Pc'][i]),
+        ]
     x0 = np.concatenate(x0_parts)
 
     # ------------------------------------------------------------------ #
     # Solve
     # ------------------------------------------------------------------ #
     opts = {
-        "ipopt.print_level": 5,
-        "ipopt.tol": 1e-3,
-        "ipopt.max_iter": 1000,
+        "ipopt.print_level": 1,
+        "ipopt.tol": 1e-6,
+        "ipopt.max_iter": 5000,
         "ipopt.acceptable_tol": 1e-5,
         "ipopt.acceptable_iter": 10,
         "ipopt.mu_strategy": "adaptive",
@@ -268,7 +280,7 @@ def solve_daopf(
     def take(shape):
         nonlocal offset
         sz = int(np.prod(shape))
-        arr = xv[offset: offset + sz].reshape(shape)
+        arr = xv[offset: offset + sz].reshape(shape, order='F')
         offset += sz
         return arr
 
@@ -305,28 +317,31 @@ def solve_daopf(
     return traj
 
 
-def run_daopf_test(num_buses: int = 24):
-    assert num_buses % 2 == 0, "num_buses must be even"
-    omega_s = 2 * np.pi * 60
-    n_buses = num_buses
-    n_gens = n_loads = num_buses // 2
+def run_daopf_test(n_buses: int = 24):
+    assert n_buses % 2 == 0, "n_buses must be even"
 
-    # Identical generator parameters
-    H, D, RD, X_p, Tsv = 8, 0, 0.04, 0.0608, 2
+    # Use SysParams for network topology and power targets
+    sys_params = SysParams(n_buses)
+    Ybus    = sys_params.Ybus
+    S_gen0  = sys_params.S_gen0
+    S_load0 = sys_params.S_load0
+    n_gens  = sys_params.n_gens
+    n_loads = sys_params.n_loads
+    omega_s = sys_params.omega_s
 
-    # Initial bus voltages
-    theta_gens  = np.linspace(0.0, -2.0, n_gens)  * np.pi / 180
-    theta_loads = np.linspace(-6.0, -8.0, n_loads) * np.pi / 180
-    V_init = np.concatenate([
-        1.04 * np.exp(1j * theta_gens),
-        0.99 * np.exp(1j * theta_loads),
-    ])
+    # Solve static OPF to get a power-flow-consistent operating point
+    print("Solving static OPF for initial conditions...")
+    opf_sol = solve_opf(sys_params)
+    print(f"OPF status: {opf_sol['status']}")
+    S_init = np.concatenate([np.full(n_gens, S_gen0), np.full(n_loads, S_load0)])
+    ic = ic_from_opf(opf_sol, sys_params, S_init)
 
-    # Balanced power injections
-    S_gen0  =  0.40 + 0.08j
-    S_load0 = -0.40 - 0.08j
-    S_init  = np.concatenate([np.full(n_gens, S_gen0), np.full(n_loads, S_load0)])
-    I_init  = np.conj(S_init / V_init)
+    print("Initial conditions from OPF:")
+    print(f"Voltages (magnitude): {np.abs(ic['voltage'])}")
+    print(f"Voltages (angle): {np.angle(ic['voltage'], deg=True)}")
+    print(f"Currents (magnitude): {np.abs(ic['current'])}")
+    print(f"Currents (angle): {np.angle(ic['current'], deg=True)}")
+    print(f"Power injections: {ic['power']}")
 
     # Load disturbance at t=0.5s
     rng = np.random.default_rng(42)
@@ -334,38 +349,19 @@ def run_daopf_test(num_buses: int = 24):
     P_load_post = np.real(S_load0) + dP_loads
     Q_load0     = np.imag(S_load0)
 
-    # Ybus: two rings (gen 0..n_gens-1, load n_gens..n_buses-1) + cross-links
-    # Each bus has degree 3 -> sparse but fully connected
-    half = n_gens // 2
-    branches = (
-        [(i, (i+1) % n_gens) for i in range(n_gens)] +                             # generator ring
-        [(n_gens + i, n_gens + (i+1) % n_loads) for i in range(n_loads)] +         # load ring
-        [(i, n_gens + (2*i) % n_loads) for i in range(half)] +                     # cross-links (first half)
-        [(half + i, n_gens + (2*i+1) % n_loads) for i in range(half)]              # cross-links (second half)
-    )
-    y_line   = 1.0 / (0.01 + 0.085j)
-    ysh_line = 0.044j
-    Ybus = np.zeros((n_buses, n_buses), dtype=complex)
-    for bi, bj in branches:
-        Ybus[bi, bi] += y_line + ysh_line
-        Ybus[bj, bj] += y_line + ysh_line
-        Ybus[bi, bj] -= y_line
-        Ybus[bj, bi] -= y_line
-
-    # Generator EMF
-    E_complex = V_init[:n_gens] + 1j * X_p * I_init[:n_gens]
+    # Generator EMF from OPF solution (consistent with Ybus @ V = I)
+    E_complex = ic['voltage'][:n_gens] + 1j * sys_params.X_p * ic['current'][:n_gens]
     E_mags    = np.abs(E_complex)
-    delta0s   = np.angle(E_complex)
-    PC_each   = np.real(S_gen0)
 
-    gen_costs = [1.0] * n_gens
-    P_min = np.full(n_gens, 0.1)
-    P_max = np.full(n_gens, 1.0)
-    V_max = np.concatenate([np.full(n_gens, 1.2), np.full(n_loads, 1.15)])
+    gen_costs = list(sys_params.gen_costs)
+    P_min = sys_params.P_min
+    P_max = sys_params.P_max
+    V_max = sys_params.V_max
 
     gens = [
-        Generator(E_mags[i], 1j*X_p, H, D, Tsv, RD, delta0s[i], PC_each,
-                  V_init[i], I_init[i], S_init[i])
+        Generator(E_mags[i], 1j*sys_params.X_p, sys_params.H, sys_params.D, sys_params.Tsv, sys_params.Rd, ic['delta'][i], ic['Tm'][i],
+                  ic['voltage'][i], ic['current'][i], ic['power'][i],
+                  Pc_min=P_min[i], Pc_max=P_max[i])
         for i in range(n_gens)
     ]
     loads = [
@@ -385,16 +381,11 @@ def run_daopf_test(num_buses: int = 24):
 
     t0 = time.perf_counter()
     sol = solve_daopf(
-        Ybus=Ybus,
         gens=gens,
         loads=loads,
         load_buses=load_buses,
-        gen_costs=gen_costs,
-        P_min=P_min,
-        P_max=P_max,
-        V_max=V_max,
-        T=5.0,
-        dt=0.01,
+        sys_params=sys_params,
+        ic=ic,
     )
     elapsed = time.perf_counter() - t0
     log.info("Number of Buses: " + str(n_buses))
@@ -429,6 +420,7 @@ def run_daopf_test(num_buses: int = 24):
     axs[0, 0].set_ylabel("ω (rad/s)")
     axs[0, 0].set_title("Rotor Speed")
     axs[0, 0].legend(fontsize=7)
+    axs[0, 0].set_ylim(omega_s - 0.1, omega_s + 0.1)
 
     for i in range(n_gens):
         axs[0, 1].plot(t_vec, np.degrees(np.real(sol.w["delta"][i, :])), label=f"Gen {i+1}")
@@ -509,8 +501,8 @@ if __name__ == "__main__":
         with open("daopf_times.pkl", "rb") as f:
             times = pickle.load(f)
 
-    busses = 18
-    timing_results = run_daopf_test(num_buses=busses)
+    busses = 4
+    timing_results = run_daopf_test(n_buses=busses)
     times[busses] = timing_results
 
     # Save times dict to file

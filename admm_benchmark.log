@@ -85,3 +85,29 @@
 2026-04-20 20:22:39,850 BusBehaviours (sequential): 353.890s over 14 iteration(s), final residual = 3.4170e+00
 2026-04-20 20:27:02,477 BusBehavioursParallel (threaded): 262.611s over 14 iteration(s), final residual = 3.4170e+00
 2026-04-20 20:27:02,478 Speedup (sequential / parallel): 1.35x
+2026-06-01 08:57:55,553 Number of Buses: 4
+2026-06-01 09:00:01,806 BusBehaviours (sequential): 126.250s over 14 iteration(s), final residual = 2.0229e+00
+2026-06-01 09:01:29,219 BusBehavioursParallel (threaded): 87.406s over 14 iteration(s), final residual = 2.0229e+00
+2026-06-01 09:01:29,219 Speedup (sequential / parallel): 1.44x
+2026-06-01 10:46:10,673 Number of Buses: 12
+2026-06-01 10:47:33,629 Number of Buses: 12
+2026-06-01 10:49:47,025 Number of Buses: 4
+2026-06-01 10:50:15,764 Number of Buses: 4
+2026-06-01 11:00:24,305 Number of Buses: 4
+2026-06-01 11:02:23,853 BusBehaviours (sequential): 119.546s over 14 iteration(s), final residual = 6.6277e+01
+2026-06-01 11:04:19,683 Number of Buses: 4
+2026-06-01 11:05:54,032 BusBehavioursParallel (threaded): 94.348s over 14 iteration(s), final residual = 6.6277e+01
+2026-06-01 14:14:55,607 Number of Buses: 4
+2026-06-01 14:17:24,329 Number of Buses: 4
+2026-06-01 14:18:56,565 BusBehavioursParallel (threaded): 92.234s over 14 iteration(s), final residual = 3.7942e+00
+2026-06-01 14:25:15,646 Number of Buses: 4
+2026-06-01 14:26:41,289 BusBehavioursParallel (threaded): 85.641s over 14 iteration(s), final residual = 7.1534e+00
+2026-06-01 15:19:24,831 Number of Buses: 4
+2026-06-01 15:21:08,156 BusBehavioursParallel (threaded): 103.323s over 14 iteration(s), final residual = 6.6870e+01
+2026-06-01 15:23:49,702 Number of Buses: 4
+2026-06-01 15:23:50,523 BusBehavioursParallel (threaded): 0.819s over 14 iteration(s), final residual = 1.8229e-03
+2026-06-01 15:24:20,105 Number of Buses: 4
+2026-06-01 15:24:26,840 Number of Buses: 4
+2026-06-01 15:24:32,980 BusBehavioursParallel (threaded): 6.138s over 14 iteration(s), final residual = 1.7910e+01
+2026-06-01 15:24:56,670 Number of Buses: 4
+2026-06-01 15:24:59,259 BusBehavioursParallel (threaded): 2.587s over 14 iteration(s), final residual = 1.1274e+01

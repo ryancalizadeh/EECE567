@@ -71,3 +71,57 @@
 2026-04-20 20:51:55,245 solve_daopf: 139.230s
 2026-04-20 21:03:51,711 Number of Buses: 18
 2026-04-20 21:03:51,711 solve_daopf: 249.823s
+2026-06-01 15:39:15,905 Number of Buses: 4
+2026-06-01 15:39:15,906 solve_daopf: 0.502s
+2026-06-01 15:47:54,167 Number of Buses: 4
+2026-06-01 15:47:54,168 solve_daopf: 0.362s
+2026-06-01 15:48:10,816 Number of Buses: 4
+2026-06-01 15:48:10,816 solve_daopf: 0.361s
+2026-06-01 15:50:59,776 Number of Buses: 4
+2026-06-01 15:50:59,776 solve_daopf: 0.344s
+2026-06-01 16:12:48,695 Number of Buses: 4
+2026-06-01 16:12:48,695 solve_daopf: 0.396s
+2026-06-03 11:07:16,885 Number of Buses: 4
+2026-06-03 11:07:16,886 solve_daopf: 0.400s
+2026-06-03 11:07:51,224 Number of Buses: 4
+2026-06-03 11:07:51,224 solve_daopf: 0.416s
+2026-06-03 11:08:08,788 Number of Buses: 4
+2026-06-03 11:08:08,788 solve_daopf: 0.392s
+2026-06-03 11:08:40,801 Number of Buses: 4
+2026-06-03 11:08:40,802 solve_daopf: 0.393s
+2026-06-03 11:10:26,625 Number of Buses: 4
+2026-06-03 11:10:26,625 solve_daopf: 0.438s
+2026-06-03 11:14:00,511 Number of Buses: 4
+2026-06-03 11:14:00,511 solve_daopf: 0.519s
+2026-06-03 11:15:04,546 Number of Buses: 4
+2026-06-03 11:15:04,547 solve_daopf: 0.435s
+2026-06-03 11:17:41,869 Number of Buses: 4
+2026-06-03 11:17:41,869 solve_daopf: 0.292s
+2026-06-03 11:18:09,061 Number of Buses: 4
+2026-06-03 11:18:09,061 solve_daopf: 0.291s
+2026-06-03 11:19:53,125 Number of Buses: 4
+2026-06-03 11:19:53,125 solve_daopf: 0.290s
+2026-06-03 11:23:09,740 Number of Buses: 4
+2026-06-03 11:23:09,740 solve_daopf: 1.465s
+2026-06-03 11:24:35,296 Number of Buses: 4
+2026-06-03 11:24:35,296 solve_daopf: 8.344s
+2026-06-03 11:27:20,142 Number of Buses: 4
+2026-06-03 11:27:20,142 solve_daopf: 8.367s
+2026-06-03 11:32:53,192 Number of Buses: 4
+2026-06-03 11:32:53,192 solve_daopf: 8.858s
+2026-06-03 12:06:41,157 Number of Buses: 4
+2026-06-03 12:06:41,157 solve_daopf: 11.440s
+2026-06-03 12:09:35,593 Number of Buses: 4
+2026-06-03 12:09:35,594 solve_daopf: 27.213s
+2026-06-03 12:23:33,450 Number of Buses: 4
+2026-06-03 12:23:33,450 solve_daopf: 19.007s
+2026-06-03 12:26:30,276 Number of Buses: 4
+2026-06-03 12:26:30,276 solve_daopf: 11.249s
+2026-06-03 12:31:12,715 Number of Buses: 4
+2026-06-03 12:31:12,715 solve_daopf: 10.330s
+2026-06-03 12:31:51,479 Number of Buses: 4
+2026-06-03 12:31:51,479 solve_daopf: 2.602s
+2026-06-03 12:36:18,993 Number of Buses: 4
+2026-06-03 12:36:18,993 solve_daopf: 2.601s
+2026-06-03 12:50:53,216 Number of Buses: 4
+2026-06-03 12:50:53,216 solve_daopf: 2.591s
