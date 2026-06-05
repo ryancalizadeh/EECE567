@@ -12,6 +12,7 @@ from BusBehaviours import BusBehaviours, BusBehavioursParallel
 from Objective import Objective
 from Solvable import Solvable
 from OPF import solve_opf, ic_from_opf
+#from stopping_criteria import primal_eps, dual_eps
 
 
 def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0, threshold=1e-3, max_iterations=100, callback=None):
@@ -26,7 +27,7 @@ def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0,
 		The projection operator representing the constraints.
 	z0 : Trajectory
 		The initial guess for the solution.
-	callback : callable, optional
+	callback : callable, optional 
 		Called as callback(iteration, x, z, u) at the end of each iteration.
 	"""
 
@@ -126,7 +127,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 
 	# Load disturbance at t=0.5s: each load shifts real power by dP in [-0.2, +0.2]
 	rng = np.random.default_rng(42)
-	dP_loads    = np.zeros(n_loads) #rng.uniform(-0.2, 0.2, n_loads)
+	dP_loads    = rng.uniform(-0.2, 0.2, n_loads)
 	P_load_post = np.real(S_load0) + dP_loads
 	Q_load0     = np.imag(S_load0)
 
@@ -160,7 +161,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	]
 
 	def make_initial_traj():
-		t = Trajectory(0.2, 0.01, {
+		t = Trajectory(sys_params.T, sys_params.dt, {
 			"voltage": n_buses, "current": n_buses, "power": n_buses,
 			"delta": n_gens, "omega": n_gens, "Tm": n_gens, "Pc": n_gens,
 		})
@@ -201,7 +202,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 		residuals = []
 		print(f"\nRunning ADMM with {label}...")
 		t0 = time.perf_counter()
-		result = admm(obj, Bi, initial_traj, threshold=1e-3, max_iterations=15, callback=make_cb(residuals))
+		result = admm(obj, Bi, initial_traj, threshold=1e-3, max_iterations=200, callback=make_cb(residuals))
 		elapsed = time.perf_counter() - t0
 		timing_results[label] = {"time": elapsed, "iterations": len(residuals), "result": result, "residuals": residuals}
 		log.info(f"{label}: {elapsed:.3f}s over {len(residuals)} iteration(s), final residual = {residuals[-1]:.4e}")
@@ -247,6 +248,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	axs[0, 0].set_ylabel("ω (rad/s)")
 	axs[0, 0].set_title("Rotor Speed")
 	axs[0, 0].legend(fontsize=7)
+	axs[0, 0].set_ylim(omega_s - 0.1, omega_s + 0.1)
 
 	for i in range(n_gens):
 		axs[0, 1].plot(t_vec, np.degrees(np.real(sol.w["delta"][i, :])), label=f"Gen {i+1}")
