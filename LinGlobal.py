@@ -1,10 +1,10 @@
-from Solvable import Solvable
+from Proxable import Proxable
 from Trajectory import Trajectory
 from SysParams import SysParams
 import cvxpy as cp
 import numpy as np
 
-class LinGlobal(Solvable):
+class LinGlobal(Proxable):
     """
     A class reprsenting the minimization of generation cost subject to operational constraints and network behaviour
     trajectory = [delta, omega, Pm, theta, Pc]

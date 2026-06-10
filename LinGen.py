@@ -1,11 +1,11 @@
 from Trajectory import Trajectory
-from Projectable import Projectable
+from Proxable import Proxable
 from SysParams import SysParams
 import numpy as np
 import scipy.linalg
 import cvxpy as cp
 
-class LinGen(Projectable):
+class LinGen(Proxable):
     def __init__(self, sys_params: SysParams, trajectory: Trajectory, use_constraints=True):
         """
         Initializes the linearized generator model.
@@ -49,7 +49,7 @@ class LinGen(Projectable):
             # TODO: Build matrices
             self.projector = 1
 
-    def project(self, trajectory: Trajectory) -> Trajectory:
+    def prox(self, trajectory: Trajectory, rho: float = 1.0) -> Trajectory:
         if self.use_constraints:
             return self.project_with_constraints(trajectory)
         else:

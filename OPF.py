@@ -2,7 +2,7 @@ from SysParams import SysParams
 import casadi as ca
 import numpy as np
 
-def solve_opf(sys_params: SysParams) -> dict:
+def solve_opf(sys_params: SysParams, post=False) -> dict:
 	"""
 	Solve the static AC Optimal Power Flow (OPF) problem using CasADI + IPOPT.
 	
@@ -20,8 +20,6 @@ def solve_opf(sys_params: SysParams) -> dict:
 	----------
 	sys_params : SysParams
 		System parameters (Ybus, constraints, costs, etc.)
-	S_load0 : complex, optional
-		Load power injection. If None, uses sys_params.S_load0
 	
 	Returns
 	-------
@@ -33,9 +31,13 @@ def solve_opf(sys_params: SysParams) -> dict:
 		- 'status': solver status string
 	"""
 
-	S_load0 = sys_params.S_load0
 	n_buses = sys_params.n_buses
 	n_gens = sys_params.n_gens
+
+	if post:
+		S_load = sys_params.P_load_post + 1j * sys_params.Q_load0
+	else:
+		S_load = sys_params.S_load0
 
 	# Create optimization variables (as 2D matrix for easier indexing)
 	V = ca.SX.sym('V', n_buses) # type: ignore
@@ -51,8 +53,8 @@ def solve_opf(sys_params: SysParams) -> dict:
 	# Power flow constraints:
 	Ybus = sys_params.Ybus
 	for bus in range(n_buses):
-		Pi = P[bus] if bus < n_gens else S_load0.real
-		Qi = Q[bus] if bus < n_gens else S_load0.imag
+		Pi = P[bus] if bus < n_gens else S_load.real
+		Qi = Q[bus] if bus < n_gens else S_load.imag
 		for other_bus in range(n_buses):
 			g = np.real(Ybus[bus, other_bus])
 			b = np.imag(Ybus[bus, other_bus])

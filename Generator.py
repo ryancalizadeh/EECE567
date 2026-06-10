@@ -4,9 +4,10 @@ import casadi as ca
 import matplotlib.pyplot as plt
 from Trajectory import Trajectory
 from SysParams import SysParams
-from Projectable import Projectable
+from Proxable import Proxable
 
-class Generator(Projectable):
+
+class Generator(Proxable):
 	"""
 	A class implementing projections onto a single classical generator + fast governor behaviour
 	"""
@@ -29,7 +30,7 @@ class Generator(Projectable):
 		self.Pc_min = Pc_min
 		self.Pc_max = Pc_max
 
-	def project(self, trajectory: Trajectory) -> Trajectory:
+	def prox(self, trajectory: Trajectory, rho: float = 1.0) -> Trajectory:
 		"""
 		Projects the given trajectory onto the generator's behaviour. In particular, it solves
 
@@ -105,16 +106,6 @@ class Generator(Projectable):
 		constraints_list.append(I_im[0] - self.I0.imag)
 		constraints_list.append(P[0] - self.S0.real)
 		constraints_list.append(Q[0] - self.S0.imag)
-
-		# # Add temporary constraint to fix variables for the first 0.5 seconds
-		# for k in range(min(int(0.5/dt), N)):
-		# 	constraints_list.append(V_re[k] - V_traj_re[0, k])
-		# 	constraints_list.append(V_im[k] - V_traj_im[0, k])
-		# 	constraints_list.append(I_re[k] - I_traj_re[0, k])
-		# 	constraints_list.append(I_im[k] - I_traj_im[0, k])
-		# 	constraints_list.append(omega[k] - self.ws)
-		# 	constraints_list.append(Tm[k] - self.Pc)
-		# 	constraints_list.append(delta[k+1] - delta[k])
 		
 		# Dynamics constraints (trapezoidal rule)
 		for k in range(N - 1):
@@ -160,16 +151,20 @@ class Generator(Projectable):
 
 		# Terminal condition: enforce steady-state at final timestep
 		k = N - 1
-		f_delta_N = omega[k] - omega[k-1]
-		E_k_re = self.E * ca.cos(delta[k] + self.delta0)
-		E_k_im = self.E * ca.sin(delta[k] + self.delta0)
-		Pe_k = E_k_re * I_re[k] + E_k_im * I_im[k]
-		f_omega_N = (Tm[k] - Pe_k - self.D*(omega[k]/self.ws - 1)) * self.ws/(2*self.H)
-		f_Tm_N = (-Tm[k] + Pc[k] - 1/self.R * (omega[k]/self.ws - 1)) / self.Tsv
+		f_delta_N = delta[k] - delta[k-1]
+		# E_k_re = self.E * ca.cos(delta[k] + self.delta0)
+		# E_k_im = self.E * ca.sin(delta[k] + self.delta0)
+		# Pe_k = E_k_re * I_re[k] + E_k_im * I_im[k]
+		# f_omega_N = (Tm[k] - Pe_k - self.D*(omega[k]/self.ws - 1)) * self.ws/(2*self.H)
+		# f_Tm_N = (-Tm[k] + Pc[k] - 1/self.R * (omega[k]/self.ws - 1)) / self.Tsv
+		f_omega_N = omega[k] - omega[k-1]
+		f_Tm_N = Tm[k] - Tm[k-1]
 
-		constraints_list.append(f_delta_N)   # omega[N-1] == ws
-		constraints_list.append(f_omega_N)   # Tm[N-1] == Pe at final step
-		constraints_list.append(f_Tm_N)      # Tm[N-1] at steady state
+		# constraints_list.append(f_delta_N)   # delta_dot = 0
+		# constraints_list.append(f_omega_N)   # omega_dot = 0
+		# constraints_list.append(f_Tm_N)      # Tm_dot = 0
+
+		constraints_list.append(omega[k] - self.ws)
 
 		
 		constraints_vec = ca.vertcat(*constraints_list)
@@ -182,7 +177,8 @@ class Generator(Projectable):
 
 
 		opts = {
-			'ipopt.print_level': 1, # 0 for silent, 5 for detailed output
+			'ipopt.print_level': 0, # 0 for silent, 5 for detailed output
+			'print_time': 0,
 			'ipopt.tol': 1e-3,
 			'ipopt.max_iter': 500,
 			'ipopt.acceptable_tol': 1e-5,
@@ -220,7 +216,7 @@ class Generator(Projectable):
 		ubx[:, 9] = self.Pc_max
 
 		# Solve NLP
-		print("Solving NLP...")
+		# print("Solving NLP...")
 		sol = nlp_solver(x0=initial_guess, lbg=lbg, ubg=ubg, lbx=lbx.flatten(), ubx=ubx.flatten())
 
 		# Extract solution and reshape back to 2D form

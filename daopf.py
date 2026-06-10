@@ -152,7 +152,11 @@ def solve_daopf(
         eq(Tm[0] - gen.Pc)
 
         # Terminal conditions (omega=omega_s at t=T)
-        # eq(omega[-1] - omega_s)
+        eq(omega[-1] - omega_s)
+        # eq(delta[-1] - delta[-2])
+        # eq(omega[-1] - omega[-2])
+        # eq(Tm[-1] - Tm[-2])
+
 
         # ODE: trapezoidal rule for k = 0..N-2
         for k in range(N - 1):
@@ -413,7 +417,7 @@ def run_daopf_test(n_buses: int = 24):
 
     # Figure 1: Generator dynamics
     fig1, axs = plt.subplots(2, 2, figsize=(14, 10))
-    fig1.suptitle("DA-OPF (Centralized) — Generator Dynamics (12-bus)")
+    fig1.suptitle(f"DA-OPF (Centralized) — Generator Dynamics ({n_buses}-bus)")
 
     for i in range(n_gens):
         axs[0, 0].plot(t_vec, np.real(sol.w["omega"][i, :]), label=f"Gen {i+1}")
@@ -450,7 +454,7 @@ def run_daopf_test(n_buses: int = 24):
 
     # Figure 2: Power
     fig2, axs2 = plt.subplots(2, 1, figsize=(12, 8))
-    fig2.suptitle("DA-OPF (Centralized) — Bus Power (12-bus)")
+    fig2.suptitle(f"DA-OPF (Centralized) — Bus Power ({n_buses}-bus)")
 
     for bus in range(n_buses):
         lbl = f"Gen {bus+1}" if bus < n_gens else f"Load {bus-n_gens+1}"

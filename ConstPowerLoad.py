@@ -1,10 +1,10 @@
-from Projectable import Projectable
+from Proxable import Proxable
 from Trajectory import Trajectory
 import numpy as np
 from typing import Callable
 from scipy.optimize import minimize_scalar
 
-class ConstPowerLoad(Projectable):
+class ConstPowerLoad(Proxable):
 	"""
 	A class implementing projections onto the behaviour of a constant power load
 	"""
@@ -15,7 +15,7 @@ class ConstPowerLoad(Projectable):
 		self.tol = tol
 
 
-	def project(self, trajectory: Trajectory) -> Trajectory:
+	def prox(self, trajectory: Trajectory, rho=1.0) -> Trajectory:
 		ret = trajectory.copy()
 		for n in range(ret.N):
 			V0 = ret.w["voltage"][:, [n]]
@@ -47,16 +47,41 @@ class ConstPowerLoad(Projectable):
 
 			# Handle the edge case where W is perfectly zero
 			if W_mag.item() < 1e-12:
-				phase = 1.0 + 0j
+				# keep the phase as an array matching V0's shape to avoid scalars
+				phase = np.ones_like(V0, dtype=complex)
 			else:
 				phase = W / W_mag
 
-			# Reconstruct the final projected complex values
-			final_i = r_opt * phase
-			final_v = (s / r_opt) * phase
+			# Reconstruct the final projected complex values (ensure arrays)
+			final_i = (r_opt * phase).reshape(V0.shape)
+			final_v = ((s / r_opt) * phase).reshape(V0.shape)
 
 			ret.w["voltage"][:, n] = final_v.ravel()
 			ret.w["current"][:, n] = final_i.ravel()
-			ret.w["power"][:, n] = s
+			# Store power per channel (broadcast scalar s to channel vector if needed)
+			ret.w["power"][:, n] = np.full(ret.w["power"][:, n].shape, s)
 
 		return ret
+
+
+def test_const_load_projection():
+	v = 2.5 + 1.5j
+	i = 0.9 - 0.5j
+	s = 3.1 - 1.4j
+
+	load = ConstPowerLoad(lambda t: s)
+	traj = Trajectory(0.03, 0.01, {"voltage": 1, "current": 1, "power": 1}, dtype=np.complex64)
+	traj.set_constant(["voltage"], [v])
+	traj.set_constant(["current"], [i])
+	projected_traj = load.prox(traj)
+	print("Projected Voltage:", projected_traj.w['voltage'])
+	print("Projected Current:", projected_traj.w['current'])
+	print("Power at each time step:", projected_traj.w['voltage'] * projected_traj.w['current'].conjugate())
+
+	# Check optimality
+	vp = projected_traj.w["voltage"][0, 0]
+	ip = projected_traj.w["current"][0, 0]
+	print("Stationary Residual", np.abs(np.abs(vp)**2 - v*np.conj(vp) - (np.abs(ip)**2 - ip*np.conj(i))))
+
+if __name__ == "__main__":
+	test_const_load_projection()

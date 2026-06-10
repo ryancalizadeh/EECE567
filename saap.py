@@ -5,25 +5,36 @@ import time
 import logging
 from SysParams import SysParams
 from Trajectory import Trajectory
-from Projectable import Projectable
 from Generator import Generator
 from ConstPowerLoad import ConstPowerLoad
 from BusBehaviours import BusBehaviours, BusBehavioursParallel
 from Objective import Objective
-from Solvable import Solvable
+from Proxable import Proxable
 from OPF import solve_opf, ic_from_opf
 #from stopping_criteria import primal_eps, dual_eps
 
+def rho_heuristic(iteration, rho_prev, r, s, tau=1.2, mu=3):
+	if rho_prev == 0:
+		return 2.0
+	elif np.linalg.norm(r) > mu*np.linalg.norm(s):
+		print(f"Warning: Norm of r at iteration {iteration} is {np.linalg.norm(r)}, multiplying rho by {tau} \n\n\n")
+		return tau * rho_prev
+	elif np.linalg.norm(s) > mu*np.linalg.norm(r):
+		print(f"Warning: Norm of s at iteration {iteration} is {np.linalg.norm(s)}, dividing rho by {tau} \n\n\n")
+		return rho_prev / tau
+	else:
+		return rho_prev
 
-def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0, threshold=1e-3, max_iterations=100, callback=None):
+
+def admm(f: Proxable, g: Proxable, z0: Trajectory, rho=lambda i, prev, r, s: 2.0, threshold=1e-3, max_iterations=100, callback=None):
 	"""
 	Minimizes a constrained optimization problem using the Alternating Direction Method of Multipliers (ADMM).
 
 	Parameters
 	----------
-	f : Solvable
+	f : Proxable
 		The (possibly constrained) objective function to be minimized.
-	g : Projectable
+	g : Proxable
 		The projection operator representing the constraints.
 	z0 : Trajectory
 		The initial guess for the solution.
@@ -36,15 +47,23 @@ def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0,
 	xs: list[Trajectory] = [Trajectory(z0.T, z0.dt, z0.vars, dtype=z0.dtype)]
 	us: list[Trajectory] = [Trajectory(z0.T, z0.dt, z0.vars, dtype=z0.dtype)]
 
+	rs = [(xs[-1] - zs[-1]).norm()]
+	ss = [(xs[-1] - zs[-1]).norm()]
+	rhos = [2.0]
+
 	for iteration in range(max_iterations-1):
-		xs.append(f.solve(zs[-1] - us[-1]))
-		zs.append(g.project(xs[-1] + us[-1]))
-		us.append(us[-1] + eta(iteration) * (xs[-1] - zs[-1]))
+		rhos.append(rho(iteration, rhos[-1], rs[-1], ss[-1]))
+		xs.append(f.prox(zs[-1] - us[-1], rhos[-1]))
+		zs.append(g.prox(xs[-1] + us[-1], rhos[-1]))
+		us.append(us[-1] + (xs[-1] - zs[-1]))
+
+		rs.append((xs[-1] - zs[-1]).norm())
+		ss.append(rhos[-1] * (zs[-1] - zs[-2]).norm())
 
 		if callback is not None:
-			callback(iteration, xs[-1], zs[-1], us[-1])
+			callback(iteration, xs[-1], zs[-1], us[-1], rs[-1], ss[-1])
 
-		if (xs[-1] - zs[-1]).norm() < threshold:
+		if rs[-1] < threshold and ss[-1] < threshold:
 			break
 
 	return xs[-1]
@@ -54,7 +73,7 @@ def test_const_load_projection():
 	traj = Trajectory(0.03, 0.01, {"voltage": 1, "current": 1, "power": 1}, dtype=np.complex64)
 	traj.set_constant(["voltage"], [1.5 + 1j])
 	traj.set_constant(["current"], [2.2 - 0.3j])
-	projected_traj = load.project(traj)
+	projected_traj = load.prox(traj)
 	print("Projected Voltage:", projected_traj.w['voltage'])
 	print("Projected Current:", projected_traj.w['current'])
 	print("Power at each time step:", projected_traj.w['voltage'] * projected_traj.w['current'].conjugate())
@@ -81,7 +100,7 @@ def test_const_load_projection_refactored():
 	traj.set_constant(["voltage"], [1.5 + 1j])
 	traj.set_constant(["current"], [2.2 - 0.3j])
 	traj.set_constant(["power"], [0.0 + 0j])
-	projected = load.project(traj)
+	projected = load.prox(traj)
 	computed_power = projected.w['voltage'] * projected.w['current'].conjugate()
 	for k in range(traj.N):
 		assert abs(computed_power[0, k] - S) < 1e-4, \
@@ -104,6 +123,11 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	opf_sol = solve_opf(sys_params)
 	print(f"OPF solved with status: {opf_sol['status']}")
 
+	# Solve static OPF for post-increase ICs
+	print("Solving static OPF for post-increase initial conditions...")
+	opf_sol_post = solve_opf(sys_params, post=True)
+	print(f"OPF solved with status: {opf_sol['status']}")
+
 	# Extract initial conditions from OPF solution
 	S_gen0 = sys_params.S_gen0
 	S_load0 = sys_params.S_load0
@@ -112,6 +136,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 		np.full(n_loads, S_load0)
 	])
 	ic = ic_from_opf(opf_sol, sys_params, S_init)
+	ic_post = ic_from_opf(opf_sol_post, sys_params, S_init)
 
 	# Verify IC feasibility
 	V_opf = ic['voltage']
@@ -124,12 +149,6 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	power_residual = np.linalg.norm(ic['power'][:n_gens] - ic['S'])
 	print(f"Power residual: {power_residual:.4e}")
 	assert power_residual < 1e-3, f"OPF solution does not match expected power injections: residual = {power_residual}"
-
-	# Load disturbance at t=0.5s: each load shifts real power by dP in [-0.2, +0.2]
-	rng = np.random.default_rng(42)
-	dP_loads    = rng.uniform(-0.2, 0.2, n_loads)
-	P_load_post = np.real(S_load0) + dP_loads
-	Q_load0     = np.imag(S_load0)
 
 	# Extract generator parameters for instantiation
 	H = sys_params.H
@@ -154,8 +173,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	]
 	loads = [
 		ConstPowerLoad(
-			lambda t, p0=np.real(S_load0), p1=float(P_load_post[j]), q=Q_load0:
-				p0 + 1j*q if t < 0.5 else p1 + 1j*q
+			sys_params.get_load_power(j)
 		)
 		for j in range(n_loads)
 	]
@@ -173,6 +191,15 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 		t.set_constant(["Tm"],      list(ic['Tm']))
 		t.set_constant(["power"],   list(ic['power']))
 		t.set_constant(["Pc"],      list(ic['Pc']))
+
+		t.w["voltage"][:, sys_params.N_step:] = ic_post['voltage'].reshape(-1, 1)
+		t.w["current"][:, sys_params.N_step:] = ic_post['current'].reshape(-1, 1)
+		t.w["power"][:, sys_params.N_step:] = ic_post['power'].reshape(-1, 1)
+		t.w["delta"][:, sys_params.N_step:] = ic_post['delta'].reshape(-1, 1)
+		t.w["omega"][:, sys_params.N_step:] = ic_post['omega'].reshape(-1, 1)
+		t.w["Tm"][:, sys_params.N_step:] = ic_post['Tm'].reshape(-1, 1)
+		t.w["Pc"][:, sys_params.N_step:] = ic_post['Pc'].reshape(-1, 1)
+
 		return t
 
 	log = logging.getLogger("admm_benchmark")
@@ -182,12 +209,12 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	log.addHandler(fh)
 
 	timing_results = {}
-	primal_residuals = []
 
-	def make_cb(residuals):
-		def cb(iteration, x, z, _u):
-			residuals.append((x - z).norm())
-			print(f"ADMM iteration {iteration+1}: primal residual = {residuals[-1]:.4e}")
+	def make_cb(primal_residuals, dual_residuals):
+		def cb(iteration, x, z, _u, r, s):
+			primal_residuals.append(r)
+			dual_residuals.append(s)
+			print(f"ADMM iteration {iteration+1}: primal residual = {primal_residuals[-1]:.4e}, dual residual = {dual_residuals[-1]:.4e}")
 		return cb
 
 	log.info("Number of Buses: " + str(n_buses))
@@ -199,13 +226,14 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	for label, Bi in test_cases:
 		initial_traj = make_initial_traj()
 		obj = Objective(Ybus, gen_costs, P_min, P_max, V_max, initial_traj)
-		residuals = []
+		primal_residuals = []
+		dual_residuals = []
 		print(f"\nRunning ADMM with {label}...")
 		t0 = time.perf_counter()
-		result = admm(obj, Bi, initial_traj, threshold=1e-3, max_iterations=2000, callback=make_cb(residuals))
+		result = admm(obj, Bi, initial_traj, rho=rho_heuristic, threshold=1e-3, max_iterations=100, callback=make_cb(primal_residuals, dual_residuals))
 		elapsed = time.perf_counter() - t0
-		timing_results[label] = {"time": elapsed, "iterations": len(residuals), "result": result, "residuals": residuals}
-		log.info(f"{label}: {elapsed:.3f}s over {len(residuals)} iteration(s), final residual = {residuals[-1]:.4e}")
+		timing_results[label] = {"time": elapsed, "iterations": len(primal_residuals), "result": result, "primal_residuals": primal_residuals, "dual_residuals": dual_residuals}
+		log.info(f"{label}: {elapsed:.3f}s over {len(primal_residuals)} iteration(s), final primal residual = {primal_residuals[-1]:.4e}, final dual residual = {dual_residuals[-1]:.4e}")
 		print(f"  -> {elapsed:.3f}s")
 
 	if seq_and_parallel:
@@ -218,10 +246,13 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	# Select solution from sequential test if available, otherwise from parallel test
 	if seq_and_parallel and "BusBehaviours (sequential)" in timing_results:
 		sol = timing_results["BusBehaviours (sequential)"]["result"]
-		primal_residuals = timing_results["BusBehaviours (sequential)"]["residuals"]
+		primal_residuals = timing_results["BusBehaviours (sequential)"]["primal_residuals"]
+		dual_residuals = timing_results["BusBehaviours (sequential)"]["dual_residuals"]
 	else:
 		sol = timing_results["BusBehavioursParallel (threaded)"]["result"]
-		primal_residuals = timing_results["BusBehavioursParallel (threaded)"]["residuals"]
+		primal_residuals = timing_results["BusBehavioursParallel (threaded)"]["primal_residuals"]
+		dual_residuals = timing_results["BusBehavioursParallel (threaded)"]["dual_residuals"]
+
 
 	t_vec  = np.arange(sol.N) * sol.dt
 	V_mag  = np.abs(sol.w["voltage"])
@@ -240,7 +271,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 
 	# Figure 1: Generator dynamics
 	fig1, axs = plt.subplots(2, 2, figsize=(14, 10))
-	fig1.suptitle("Generator Dynamics (12-bus, 6 gens)")
+	fig1.suptitle(f"Generator Dynamics ({n_buses}-bus, {n_gens} gens)")
 
 	for i in range(n_gens):
 		axs[0, 0].plot(t_vec, np.real(sol.w["omega"][i, :]), label=f"Gen {i+1}")
@@ -277,7 +308,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 
 	# Figure 2: Power
 	fig2, axs2 = plt.subplots(2, 1, figsize=(12, 8))
-	fig2.suptitle("Bus Power (12-bus)")
+	fig2.suptitle(f"Bus Power ({n_buses}-bus)")
 
 	for bus in range(n_buses):
 		lbl = f"Gen {bus+1}" if bus < n_gens else f"Load {bus-n_gens+1}"
@@ -301,13 +332,14 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 
 	# Figure 3: ADMM convergence and feasibility
 	fig3, axs3 = plt.subplots(3, 1, figsize=(10, 9))
-	fig3.suptitle("ADMM Convergence and Feasibility")
+	fig3.suptitle(f"ADMM Convergence and Feasibility ({n_buses}-bus)")
 
-	axs3[0].semilogy(primal_residuals, marker='o', markersize=3)
+	axs3[0].semilogy(primal_residuals, marker='o', markersize=3, label="primal residual")
+	axs3[0].semilogy(dual_residuals, marker='o', markersize=3, label="dual residual")
 	axs3[0].axhline(1e-3, color='r', linestyle='--', label="threshold")
 	axs3[0].set_xlabel("Iteration")
-	axs3[0].set_ylabel("‖x − z‖")
-	axs3[0].set_title("Primal Residual")
+	axs3[0].set_ylabel("Residual")
+	axs3[0].set_title("Primal and Dual Residuals over Iterations")
 	axs3[0].legend()
 	axs3[0].grid(True)
 

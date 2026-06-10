@@ -1,21 +1,19 @@
-from Solvable import Solvable
+from Proxable import Proxable
 from Trajectory import Trajectory
 import cvxpy as cp
 import numpy as np
 
-class Objective(Solvable):
+class Objective(Proxable):
 	"""
 	A class reprsenting the minimization of generation cost subject to operational constraints and linear network behaviour
 	"""
 
-	def __init__(self, Ybus, gen_costs, P_min, P_max, V_max, t: Trajectory, rho=1.0):
+	def __init__(self, Ybus, gen_costs, P_min, P_max, V_max, t: Trajectory):
 		self.Ybus = Ybus
 		self.gen_costs = gen_costs
 		self.N = t.N
 		self.g = len(gen_costs)
 		self.n_buses = Ybus.shape[0]
-
-		self.rho = rho
 
 		P_min = np.array(P_min).reshape(-1, 1)
 		P_max = np.array(P_max).reshape(-1, 1)
@@ -30,6 +28,7 @@ class Objective(Solvable):
 		self.Iw = cp.Parameter(self.I.shape, complex=True)
 		self.Sw = cp.Parameter(self.S.shape, complex=True)
 		self.Pcw = cp.Parameter((self.g, self.N))
+		self.rho = cp.Parameter(nonneg=True)
 
 		self.x = cp.vstack([self.V, self.I, self.S])
 		self.w = cp.vstack([self.Vw, self.Iw, self.Sw])
@@ -39,8 +38,8 @@ class Objective(Solvable):
 		self.cost = cp.sum([cp.quad_over_lin(cp.real(self.S[i, :]), 1/self.gen_costs[i]) for i in range(self.g)])
 
 		# Self.penalty = rho * ||x-w||_2^2, recalling that these are complex numbers
-		self.penalty = self.rho * cp.sum_squares(self.x - self.w)
-		self.Pc_penalty = self.rho * cp.sum_squares(self.Pc_var - self.Pcw)
+		self.penalty = self.rho/2 * cp.sum_squares(self.x - self.w)
+		self.Pc_penalty = self.rho/2 * cp.sum_squares(self.Pc_var - self.Pcw)
 
 		# TODO: Verify that optimization problem is the same as DAOPF formulation
 
@@ -56,17 +55,17 @@ class Objective(Solvable):
 		self.problem = cp.Problem(cp.Minimize(self.cost + self.penalty + self.Pc_penalty), self.constraints)
 		
 
-
-	def solve(self, t: Trajectory) -> Trajectory:
-		self.Vw.value = t.get_var_names(["voltage"])
-		self.Iw.value = t.get_var_names(["current"])
-		self.Sw.value = t.get_var_names(["power"])[:self.g, :]
-		self.Pcw.value = np.real(t.get_var_names(["Pc"]))
+	def prox(self, trajectory: Trajectory, rho: float = 1.0) -> Trajectory:
+		self.Vw.value = trajectory.get_var_names(["voltage"])
+		self.Iw.value = trajectory.get_var_names(["current"])
+		self.Sw.value = trajectory.get_var_names(["power"])[:self.g, :]
+		self.Pcw.value = np.real(trajectory.get_var_names(["Pc"]))
+		self.rho.value = rho
 
 		self.problem.solve()
 
 		# Extract solution and return a trajectory
-		ret = t.copy()
+		ret = trajectory.copy()
 
 		if self.V.value is not None:
 			ret.set_var_names(["voltage"], self.V.value)

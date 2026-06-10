@@ -15,6 +15,8 @@ class SysParams:
 		self.T = 5.0
 		self.dt = 0.05
 		self.N = int(self.T / self.dt)
+		self.T_step = 0.5
+		self.N_step = int(self.T_step / self.dt)
 
 		# Generator parameters
 		self.H = 8
@@ -29,6 +31,12 @@ class SysParams:
 		self.S_gen0  = 0.40 + 0.08j
 		self.S_load0 = -0.40 - 0.08j
 
+		# Load disturbance at T_step s: each load shifts real power by dP in [-0.2, +0.2]
+		rng = np.random.default_rng(42)
+		dP_loads    = rng.uniform(-0.2, 0.2, self.n_loads)
+		self.P_load_post = np.real(self.S_load0) + dP_loads
+		self.Q_load0     = np.imag(self.S_load0)
+
 		# Constraints
 		self.P_min = np.full(self.n_gens, 0.1)
 		self.P_max = np.full(self.n_gens, 2.0)
@@ -40,6 +48,15 @@ class SysParams:
 
 		# Build Ybus matrix with two rings + cross-links topology
 		self.Ybus = self._build_ybus()
+
+	def get_load_power(self, j: int):
+		"""Returns load power as a function of time."""
+		def S_load(t):
+			p0 = np.real(self.S_load0)
+			p1 = self.P_load_post[j]
+			q = self.Q_load0
+			return p0 + 1j*q if t < self.T_step else p1 + 1j*q
+		return S_load
 
 	def _build_ybus(self) -> np.ndarray:
 		"""Build Ybus matrix: two rings (gen/load) + cross-links."""
