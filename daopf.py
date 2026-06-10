@@ -92,6 +92,7 @@ def solve_daopf(
     ubx_Tm    = [np.full(N,  np.inf) for _ in range(n_gens)]
     lbx_Pc    = [np.full(N, P_min_arr[i]) for i in range(n_gens)]
     ubx_Pc    = [np.full(N, P_max_arr[i]) for i in range(n_gens)]
+    # TODO: Fix bounds on Pc, should be on Tm
 
     lbx_parts = [lbx_V_re.flatten(), lbx_V_im.flatten(),
                  lbx_I_re.flatten(), lbx_I_im.flatten()]
@@ -305,7 +306,7 @@ def solve_daopf(
     traj = Trajectory(T, dt, {
         "voltage": n_buses, "current": n_buses, "power": n_buses,
         "delta": n_gens, "omega": n_gens, "Tm": n_gens, "Pc": n_gens,
-    })
+    }, dtype=np.complex64)
     traj.w["voltage"] = sol_V
     traj.w["current"] = sol_I
     traj.w["power"]   = sol_S

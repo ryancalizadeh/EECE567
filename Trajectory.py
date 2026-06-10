@@ -12,13 +12,14 @@ class Trajectory:
 		A dictionary mapping variable names to their dimensions.
 	"""
 
-	def __init__(self, T: float, dt: float, vars: dict):
+	def __init__(self, T: float, dt: float, vars: dict, dtype: np.typing.DTypeLike=np.float64):
 		self.T = T
 		self.dt = dt
 		self.N = int(T / dt)
 		self.vars = vars
 		self.q = sum(vars.values())
-		self.w = {key: np.zeros((size, self.N), dtype=np.complex64) for key, size in vars.items()}
+		self.dtype = dtype
+		self.w = {key: np.zeros((size, self.N), dtype=dtype) for key, size in vars.items()}
 
 	def get_var_names(self, var_names: list[str], idx=None) -> np.ndarray:
 		"""
@@ -33,7 +34,7 @@ class Trajectory:
 		"""
 
 		if not var_names:
-			return np.array([], dtype=np.complex64).reshape(0, self.N)
+			return np.array([], dtype=self.dtype).reshape(0, self.N)
 
 		if idx is None:
 			sub_trajectories = [self.w[var_name] for var_name in var_names]
@@ -97,7 +98,9 @@ class Trajectory:
 			return NotImplemented
 		if self.N != other.N or self.vars != other.vars:
 			raise ValueError("Trajectories must have the same dimensions and variables for addition.")
-		result = Trajectory(self.T, self.dt, self.vars)
+		if self.dtype != other.dtype:
+			raise ValueError("Trajectories must have the same data type for addition.")
+		result = Trajectory(self.T, self.dt, self.vars, dtype=self.dtype)
 		for var_name in self.vars:
 			result.w[var_name] = self.w[var_name] + other.w[var_name]
 		return result
@@ -107,14 +110,18 @@ class Trajectory:
 			return NotImplemented
 		if self.N != other.N or self.vars != other.vars:
 			raise ValueError("Trajectories must have the same dimensions and variables for subtraction.")
-		result = Trajectory(self.T, self.dt, self.vars)
+		if self.dtype != other.dtype:
+			raise ValueError("Trajectories must have the same data type for subtraction.")
+		result = Trajectory(self.T, self.dt, self.vars, dtype=self.dtype)
 		for var_name in self.vars:
 			result.w[var_name] = self.w[var_name] - other.w[var_name]
 		return result
 	
 	def __mul__(self, scalar):
-		result = Trajectory(self.T, self.dt, self.vars)
+		result = Trajectory(self.T, self.dt, self.vars, dtype=self.dtype)
 		for var_name in self.vars:
+			if np.iscomplexobj(scalar) and not np.iscomplexobj(self.w[var_name]):
+				raise ValueError(f"Cannot multiply real trajectory variable '{var_name}' by a complex scalar.")
 			result.w[var_name] = self.w[var_name] * scalar
 		return result
 
@@ -130,7 +137,7 @@ class Trajectory:
 		Trajectory
 			A new trajectory with the same dimensions and data.
 		"""
-		result = Trajectory(self.T, self.dt, self.vars)
+		result = Trajectory(self.T, self.dt, self.vars, dtype=self.dtype)
 		result.w = {key: value.copy() for key, value in self.w.items()}
 		return result
 	

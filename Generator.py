@@ -241,29 +241,6 @@ class Generator(Projectable):
 		sol_S = (sol_P + 1j * sol_Q)
 		sol_Pc = sol_x[9, :].reshape(1, -1)
 
-		# # Plot omega
-		# fig, axs = plt.subplots(1, 1, figsize=(10, 5))
-		# axs.plot(np.arange(N)*dt, sol_omega[0, :], label='Projected Omega')
-		# axs.axhline(self.ws, color='r', linestyle='--', label='Synchronous Speed')
-		# axs.set_title('Projected Rotor Speed (Omega)')
-		# axs.set_xlabel('Time (s)')
-		# axs.set_ylabel('Omega (rad/s)')
-		# axs.set_ylim(self.ws - 0.08, self.ws + 0.08)
-		# axs.legend()
-		# plt.grid()
-		# plt.show()
-
-		# # Plot voltage
-		# fig, axs = plt.subplots(1, 1, figsize=(10, 5))
-		# axs.plot(np.arange(N)*dt, sol_V_re, label='Projected V_re')
-		# axs.plot(np.arange(N)*dt, sol_V_im, label='Projected V_im')
-		# axs.set_title('Projected Voltage')
-		# axs.set_xlabel('Time (s)')
-		# axs.set_ylabel('Voltage (V)')
-		# axs.legend()
-		# plt.grid()
-		# plt.show()
-
 		ret.set_var_names(["voltage"], sol_V)
 		ret.set_var_names(["current"], sol_I)
 		ret.set_var_names(["delta"], sol_delta)

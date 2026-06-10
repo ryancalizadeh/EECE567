@@ -33,8 +33,8 @@ def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0,
 
 	# Initialize x0, z0, mu0
 	zs: list[Trajectory] = [z0.copy()]
-	xs: list[Trajectory] = [Trajectory(z0.T, z0.dt, z0.vars)]
-	us: list[Trajectory] = [Trajectory(z0.T, z0.dt, z0.vars)]
+	xs: list[Trajectory] = [Trajectory(z0.T, z0.dt, z0.vars, dtype=z0.dtype)]
+	us: list[Trajectory] = [Trajectory(z0.T, z0.dt, z0.vars, dtype=z0.dtype)]
 
 	for iteration in range(max_iterations-1):
 		xs.append(f.solve(zs[-1] - us[-1]))
@@ -51,7 +51,7 @@ def admm(f: Solvable, g: Projectable, z0: Trajectory, eta=lambda iteration: 1.0,
 
 def test_const_load_projection():
 	load = ConstPowerLoad(lambda t: 2.1 + 0.5j)
-	traj = Trajectory(0.03, 0.01, {"voltage": 1, "current": 1, "power": 1})
+	traj = Trajectory(0.03, 0.01, {"voltage": 1, "current": 1, "power": 1}, dtype=np.complex64)
 	traj.set_constant(["voltage"], [1.5 + 1j])
 	traj.set_constant(["current"], [2.2 - 0.3j])
 	projected_traj = load.project(traj)
@@ -60,7 +60,7 @@ def test_const_load_projection():
 	print("Power at each time step:", projected_traj.w['voltage'] * projected_traj.w['current'].conjugate())
 
 def test_get_set_var_names():
-	traj = Trajectory(0.03, 0.01, {"voltage": 2, "current": 1})
+	traj = Trajectory(0.03, 0.01, {"voltage": 2, "current": 1}, dtype=np.complex64)
 	data = np.array([[1+1j, 2+2j, 3+3j], [4+4j, 5+5j, 6+6j]], dtype=np.complex64)
 	traj.set_var_names(["voltage"], data)
 	assert np.allclose(traj.get_var_names(["voltage"]), data)
@@ -77,7 +77,7 @@ def test_get_set_var_names():
 def test_const_load_projection_refactored():
 	S = 2.1 + 0.5j
 	load = ConstPowerLoad(lambda t: S)
-	traj = Trajectory(0.03, 0.01, {"voltage": 1, "current": 1, "power": 1})
+	traj = Trajectory(0.03, 0.01, {"voltage": 1, "current": 1, "power": 1}, dtype=np.complex64)
 	traj.set_constant(["voltage"], [1.5 + 1j])
 	traj.set_constant(["current"], [2.2 - 0.3j])
 	traj.set_constant(["power"], [0.0 + 0j])
@@ -164,7 +164,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 		t = Trajectory(sys_params.T, sys_params.dt, {
 			"voltage": n_buses, "current": n_buses, "power": n_buses,
 			"delta": n_gens, "omega": n_gens, "Tm": n_gens, "Pc": n_gens,
-		})
+		}, dtype=np.complex64)
 		# Use OPF-derived initial conditions
 		t.set_constant(["voltage"], list(ic['voltage']))
 		t.set_constant(["current"], list(ic['current']))
@@ -202,7 +202,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 		residuals = []
 		print(f"\nRunning ADMM with {label}...")
 		t0 = time.perf_counter()
-		result = admm(obj, Bi, initial_traj, threshold=1e-3, max_iterations=200, callback=make_cb(residuals))
+		result = admm(obj, Bi, initial_traj, threshold=1e-3, max_iterations=2000, callback=make_cb(residuals))
 		elapsed = time.perf_counter() - t0
 		timing_results[label] = {"time": elapsed, "iterations": len(residuals), "result": result, "residuals": residuals}
 		log.info(f"{label}: {elapsed:.3f}s over {len(residuals)} iteration(s), final residual = {residuals[-1]:.4e}")

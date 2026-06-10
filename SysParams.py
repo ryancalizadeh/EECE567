@@ -22,6 +22,8 @@ class SysParams:
 		self.Rd = 0.04
 		self.X_p = 0.0608
 		self.Tsv = 2
+		self.M = self.H / (2 * np.pi * self.omega_s)
+		self.Xd = self.X_p
 
 		# Power dispatch targets
 		self.S_gen0  = 0.40 + 0.08j
@@ -34,7 +36,7 @@ class SysParams:
 			np.full(self.n_gens, 2.2),
 			np.full(self.n_loads, 2.15)
 		])
-		self.gen_costs = np.ones(self.n_gens)
+		self.gen_costs = np.ones(self.n_gens) + 0.1 * np.arange(self.n_gens)
 
 		# Build Ybus matrix with two rings + cross-links topology
 		self.Ybus = self._build_ybus()

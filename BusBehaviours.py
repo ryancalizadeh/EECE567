@@ -14,7 +14,7 @@ class BusBehaviours(Projectable):
 		for i, gen in enumerate(self.gens):
 			print(f"Projecting onto generator {i+1}/{len(self.gens)}")
 			gen_vars = ["voltage", "current", "delta", "omega", "Tm", "power", "Pc"]
-			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in gen_vars})
+			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in gen_vars}, dtype=trajectory.dtype)
 			for v in gen_vars:
 				t.w[v] = trajectory.w[v][[i], :]
 			projected_t = gen.project(t)
@@ -23,7 +23,7 @@ class BusBehaviours(Projectable):
 		for i, load in enumerate(self.loads, start=len(self.gens)):
 			print(f"Projecting onto load {i+1}/{len(self.loads)}")
 			load_vars = ["voltage", "current", "power"]
-			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in load_vars})
+			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in load_vars}, dtype=trajectory.dtype)
 			for v in load_vars:
 				t.w[v] = trajectory.w[v][[i], :]
 			projected_t = load.project(t)
@@ -45,7 +45,7 @@ class BusBehavioursParallel(Projectable):
 			i, gen = args
 			print(f"Projecting onto generator {i+1}/{len(self.gens)}")
 			gen_vars = ["voltage", "current", "delta", "omega", "Tm", "power", "Pc"]
-			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in gen_vars})
+			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in gen_vars}, dtype=trajectory.dtype)
 			for v in gen_vars:
 				t.w[v] = trajectory.w[v][[i], :]
 			projected_t = gen.project(t)
@@ -55,7 +55,7 @@ class BusBehavioursParallel(Projectable):
 			i, load = args
 			print(f"Projecting onto load {i+1}/{len(self.loads)}")
 			load_vars = ["voltage", "current", "power"]
-			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in load_vars})
+			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in load_vars}, dtype=trajectory.dtype)
 			for v in load_vars:
 				t.w[v] = trajectory.w[v][[i], :]
 			projected_t = load.project(t)

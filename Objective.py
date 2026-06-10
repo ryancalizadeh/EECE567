@@ -42,6 +42,8 @@ class Objective(Solvable):
 		self.penalty = self.rho * cp.sum_squares(self.x - self.w)
 		self.Pc_penalty = self.rho * cp.sum_squares(self.Pc_var - self.Pcw)
 
+		# TODO: Verify that optimization problem is the same as DAOPF formulation
+
 		self.constraints = [self.Ybus @ self.V == self.I]
 		self.constraints.append(cp.real(self.S) >= P_min)
 		self.constraints.append(cp.real(self.S) <= P_max)
