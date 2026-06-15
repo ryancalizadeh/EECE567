@@ -97,15 +97,11 @@ class Generator(Proxable):
 		constraints_list = []
 		
 		# Initial conditions
+		# Match daopf: only the rotor states are pinned at t=0; V/I/P/Q at t=0
+		# are left free (determined by the algebraic constraint + network).
 		constraints_list.append(delta[0])
 		constraints_list.append(omega[0] - self.ws)
 		constraints_list.append(Tm[0] - self.Pc)
-		constraints_list.append(V_re[0] - self.V0.real)
-		constraints_list.append(V_im[0] - self.V0.imag)
-		constraints_list.append(I_re[0] - self.I0.real)
-		constraints_list.append(I_im[0] - self.I0.imag)
-		constraints_list.append(P[0] - self.S0.real)
-		constraints_list.append(Q[0] - self.S0.imag)
 		
 		# Dynamics constraints (trapezoidal rule)
 		for k in range(N - 1):
@@ -179,7 +175,7 @@ class Generator(Proxable):
 		opts = {
 			'ipopt.print_level': 0, # 0 for silent, 5 for detailed output
 			'print_time': 0,
-			'ipopt.tol': 1e-3,
+			'ipopt.tol': 1e-6,
 			'ipopt.max_iter': 500,
 			'ipopt.acceptable_tol': 1e-5,
 			'ipopt.acceptable_iter': 10,

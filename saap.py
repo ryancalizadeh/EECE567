@@ -13,7 +13,7 @@ from Proxable import Proxable
 from OPF import solve_opf, ic_from_opf
 #from stopping_criteria import primal_eps, dual_eps
 
-def rho_heuristic(iteration, rho_prev, r, s, tau=1.2, mu=3):
+def rho_heuristic(iteration, rho_prev, r, s, tau=1.1, mu=10):
 	if rho_prev == 0:
 		return 2.0
 	elif np.linalg.norm(r) > mu*np.linalg.norm(s):
@@ -182,7 +182,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 		t = Trajectory(sys_params.T, sys_params.dt, {
 			"voltage": n_buses, "current": n_buses, "power": n_buses,
 			"delta": n_gens, "omega": n_gens, "Tm": n_gens, "Pc": n_gens,
-		}, dtype=np.complex64)
+		}, dtype=np.complex128)
 		# Use OPF-derived initial conditions
 		t.set_constant(["voltage"], list(ic['voltage']))
 		t.set_constant(["current"], list(ic['current']))
@@ -230,7 +230,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 		dual_residuals = []
 		print(f"\nRunning ADMM with {label}...")
 		t0 = time.perf_counter()
-		result = admm(obj, Bi, initial_traj, rho=rho_heuristic, threshold=1e-3, max_iterations=100, callback=make_cb(primal_residuals, dual_residuals))
+		result = admm(obj, Bi, initial_traj, rho=rho_heuristic, threshold=1e-3, max_iterations=2000, callback=make_cb(primal_residuals, dual_residuals))
 		elapsed = time.perf_counter() - t0
 		timing_results[label] = {"time": elapsed, "iterations": len(primal_residuals), "result": result, "primal_residuals": primal_residuals, "dual_residuals": dual_residuals}
 		log.info(f"{label}: {elapsed:.3f}s over {len(primal_residuals)} iteration(s), final primal residual = {primal_residuals[-1]:.4e}, final dual residual = {dual_residuals[-1]:.4e}")

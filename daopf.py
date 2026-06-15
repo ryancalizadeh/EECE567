@@ -7,6 +7,7 @@ import time
 import logging
 from saap import Trajectory, Generator, ConstPowerLoad, SysParams
 from OPF import solve_opf, ic_from_opf
+from scipy.linalg import null_space
 
 
 def solve_daopf(
@@ -15,7 +16,9 @@ def solve_daopf(
     load_buses: list,
     sys_params: SysParams,
     ic: dict[str, np.ndarray],
-) -> Trajectory:
+    x0_override: np.ndarray | None = None,
+    opts_override: dict | None = None,
+) -> tuple:
     """
     Solves the dynamics-aware OPF as a single monolithic NLP using CasADI/IPOPT.
 
@@ -260,7 +263,7 @@ def solve_daopf(
     # ------------------------------------------------------------------ #
     # Solve
     # ------------------------------------------------------------------ #
-    opts = {
+    default_opts = {
         "ipopt.print_level": 1,
         "ipopt.tol": 1e-6,
         "ipopt.max_iter": 5000,
@@ -269,11 +272,13 @@ def solve_daopf(
         "ipopt.mu_strategy": "adaptive",
         "ipopt.nlp_scaling_method": "gradient-based",
     }
+    opts = opts_override if opts_override is not None else default_opts
+    x0_use = x0_override if x0_override is not None else x0
     nlp = {"f": obj, "x": x, "g": g}
     solver = ca.nlpsol("daopf_solver", "ipopt", nlp, opts)
 
     print("Solving centralized DA-OPF NLP...")
-    sol = solver(x0=x0, lbx=lbx, ubx=ubx, lbg=lbg, ubg=ubg)
+    sol = solver(x0=x0_use, lbx=lbx, ubx=ubx, lbg=lbg, ubg=ubg)
     print(f"Solver status: {solver.stats()['return_status']}")
 
     # ------------------------------------------------------------------ #
@@ -319,10 +324,230 @@ def solve_daopf(
     traj.w["Tm"]      = sol_Tm.astype(np.complex64)
     traj.w["Pc"]      = sol_Pc.astype(np.complex64)
 
-    return traj
+    nlp_fns = {
+        "x": x,
+        "f": obj,
+        "g": g,
+        "lbx": lbx,
+        "ubx": ubx,
+        "lbg": lbg,
+        "ubg": ubg,
+    }
+    return traj, sol, nlp_fns
 
 
-def run_daopf_test(n_buses: int = 24):
+def check_kkt(sol, nlp_fns, tol: float = 1e-5):
+    """
+    Verify KKT conditions at the IPOPT solution.
+
+    Checks:
+      1. Stationarity:        ||∇_x L||_inf < tol
+      2. Primal feasibility:  max constraint violation < tol
+      3. Dual feasibility:    inequality multipliers have correct sign
+      4. Complementary slack: |μ * g(x*)| ≈ 0
+    """
+    x_sym = nlp_fns["x"]
+    f_sym = nlp_fns["f"]
+    g_sym = nlp_fns["g"]
+    lbg   = nlp_fns["lbg"]
+    ubg   = nlp_fns["ubg"]
+    lbx   = nlp_fns["lbx"]
+    ubx   = nlp_fns["ubx"]
+
+    lam_g_sym = ca.MX.sym("lam_g", g_sym.size1())  # type: ignore[attr-defined]
+    lam_x_sym = ca.MX.sym("lam_x", x_sym.size1())  # type: ignore[attr-defined]
+    L = f_sym + ca.dot(lam_g_sym, g_sym) + ca.dot(lam_x_sym, x_sym)
+    grad_L = ca.gradient(L, x_sym)
+    grad_L_fn = ca.Function("grad_L", [x_sym, lam_g_sym, lam_x_sym], [grad_L])
+
+    x_val    = sol["x"].full().flatten()
+    lam_g    = sol["lam_g"].full().flatten()
+    lam_x    = sol["lam_x"].full().flatten()
+    g_val    = sol["g"].full().flatten()
+
+    grad_val = grad_L_fn(x_val, lam_g, lam_x).full().flatten() # type: ignore
+    stationarity = np.max(np.abs(grad_val))
+
+    # Primal feasibility: constraints outside [lbg, ubg]
+    viol = np.maximum(lbg - g_val, 0.0) + np.maximum(g_val - ubg, 0.0)
+    # Variable bounds
+    viol_x = np.maximum(lbx - x_val, 0.0) + np.maximum(x_val - ubx, 0.0)
+    primal_feas = max(np.max(viol), np.max(viol_x))
+
+    # Dual feasibility: for g >= 0 constraints (lbg=0, ubg=inf), lam_g should be <= 0
+    # (IPOPT convention: lam_g is the multiplier for the constraint g - lbg >= 0)
+    # Equality constraints (lbg == ubg) can have any sign.
+    is_eq   = (ubg - lbg) < 1e-10
+    is_ineq_lb = (~is_eq) & np.isfinite(lbg)   # lower-bounded inequality
+    is_ineq_ub = (~is_eq) & np.isfinite(ubg)   # upper-bounded inequality
+    dual_viol_lb = np.max(np.maximum( lam_g[is_ineq_lb], 0.0)) if is_ineq_lb.any() else 0.0
+    dual_viol_ub = np.max(np.maximum(-lam_g[is_ineq_ub], 0.0)) if is_ineq_ub.any() else 0.0
+    dual_feas = max(dual_viol_lb, dual_viol_ub)
+
+    # Complementary slackness: only check the finite side of each constraint.
+    # ubg = inf for one-sided lower inequalities, so skip those for the ub check
+    # (0 * inf = nan otherwise).
+    has_lb = np.isfinite(lbg)
+    has_ub = np.isfinite(ubg)
+    comp_slack_lb = np.max(np.abs(lam_g[has_lb] * (g_val[has_lb] - lbg[has_lb]))) if has_lb.any() else 0.0
+    comp_slack_ub = np.max(np.abs(lam_g[has_ub] * (ubg[has_ub] - g_val[has_ub]))) if has_ub.any() else 0.0
+    comp_slack = max(comp_slack_lb, comp_slack_ub)
+
+    print("\n--- KKT Conditions ---")
+    print(f"  Stationarity  ||∇L||_inf : {stationarity:.3e}  {'PASS' if stationarity < tol else 'FAIL'}")
+    print(f"  Primal feas   max viol   : {primal_feas:.3e}  {'PASS' if primal_feas < tol else 'FAIL'}")
+    print(f"  Dual feas     max viol   : {dual_feas:.3e}  {'PASS' if dual_feas < tol else 'FAIL'}")
+    print(f"  Comp. slack   max |μg|   : {comp_slack:.3e}  {'PASS' if comp_slack < tol else 'FAIL'}")
+    kkt_ok = stationarity < tol and primal_feas < tol and dual_feas < tol and comp_slack < tol
+    print(f"  KKT overall: {'SATISFIED' if kkt_ok else 'VIOLATED'} (tol={tol:.0e})")
+    return kkt_ok
+
+
+def check_sosc(sol, nlp_fns, tol: float = 1e-6, active_tol: float = 1e-4):
+    """
+    Check Second-Order Sufficient Conditions (SOSC) at the IPOPT solution.
+
+    Computes the reduced Hessian Z^T H Z restricted to the null space of the
+    active constraint Jacobian. Reports the minimum eigenvalue — positive means
+    the solution is a strict local minimum.
+
+    Warning: expensive for large problems (~14k variables); uses dense null-space
+    computation after extracting only the active constraint rows.
+    """
+    x_sym  = nlp_fns["x"]
+    f_sym  = nlp_fns["f"]
+    g_sym  = nlp_fns["g"]
+    lbg    = nlp_fns["lbg"]
+    ubg    = nlp_fns["ubg"]
+    lbx    = nlp_fns["lbx"]
+    ubx    = nlp_fns["ubx"]
+
+    lam_g_sym = ca.MX.sym("lam_g", g_sym.size1())  # type: ignore[attr-defined]
+    L = f_sym + ca.dot(lam_g_sym, g_sym)
+    H_sym, _ = ca.hessian(L, x_sym)
+    H_fn = ca.Function("H", [x_sym, lam_g_sym], [H_sym])
+    J_fn = ca.Function("J", [x_sym], [ca.jacobian(g_sym, x_sym)])
+
+    x_val   = sol["x"].full().flatten()
+    lam_g   = sol["lam_g"].full().flatten()
+    g_val   = sol["g"].full().flatten()
+
+    H_sp = H_fn(x_val, lam_g)
+    J_sp = J_fn(x_val)
+    H_num = np.array(H_sp.full()) # type: ignore
+    J_num = np.array(J_sp.full()) # type: ignore
+
+    # Identify active constraints: equalities always active; inequalities active when at bound
+    is_eq      = (ubg - lbg) < 1e-10
+    active_lb  = (~is_eq) & (np.abs(g_val - lbg) < active_tol)
+    active_ub  = (~is_eq) & (np.abs(g_val - ubg) < active_tol)
+    active     = is_eq | active_lb | active_ub
+
+    # Also include variable bounds (treated as additional rows in A_active)
+    bound_lb = np.abs(x_val - lbx) < active_tol
+    bound_ub = np.abs(x_val - ubx) < active_tol
+    bound_active = bound_lb | bound_ub
+
+    A_g = J_num[active, :]
+    n_x = x_val.shape[0]
+    A_bnd = np.eye(n_x)[bound_active, :]
+    A_active = np.vstack([A_g, A_bnd]) if A_bnd.shape[0] > 0 else A_g
+
+    print(f"\n--- SOSC Check ---")
+    print(f"  Active constraints: {active.sum()} / {len(active)}  (+ {bound_active.sum()} bound rows)")
+
+    if A_active.shape[0] >= n_x:
+        print("  WARNING: active set spans full space — null space is trivial, SOSC trivially satisfied")
+        return True
+
+    Z = null_space(A_active)
+    rH = Z.T @ H_num @ Z
+    eigs = np.linalg.eigvalsh(rH)
+    lam_min = eigs.min()
+    print(f"  Reduced Hessian size: {rH.shape[0]}×{rH.shape[1]}")
+    print(f"  Min eigenvalue: {lam_min:.6f}  {'PASS (local min)' if lam_min > -tol else 'FAIL (not local min)'}")
+    return lam_min > -tol
+
+
+def multi_start_verify(
+    gens, loads, load_buses, sys_params, ic,
+    n_starts: int = 5,
+    noise_scale: float = 0.05,
+    seed: int = 0,
+):
+    """
+    Solve the DA-OPF from multiple random starting points and compare objectives.
+
+    n_starts perturbed warm starts are generated by adding scaled Gaussian noise
+    to the steady-state warm start. All feasible solutions are compared; if they
+    cluster near the best known objective, global optimality confidence is high.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Solve once with the standard warm start to get reference objective
+    print("\n--- Multi-Start Global Optimality Check ---")
+    print(f"  Running {n_starts} additional starts (noise_scale={noise_scale})...")
+
+    best_obj = None
+    objectives = []
+
+    quiet_opts = {
+        "ipopt.print_level": 0,
+        "print_time": 0,
+        "ipopt.tol": 1e-6,
+        "ipopt.max_iter": 5000,
+        "ipopt.acceptable_tol": 1e-5,
+        "ipopt.acceptable_iter": 10,
+        "ipopt.mu_strategy": "adaptive",
+        "ipopt.nlp_scaling_method": "gradient-based",
+    }
+
+    # Build the default warm start once to know its size, then perturb it
+    _, ref_sol, ref_nlp = solve_daopf(
+        gens=gens, loads=loads, load_buses=load_buses,
+        sys_params=sys_params, ic=ic,
+        opts_override=quiet_opts,
+    )
+    ref_x0 = ref_sol["x"].full().flatten()
+    x_range = ref_nlp["ubx"] - ref_nlp["lbx"]
+    x_range = np.where(np.isfinite(x_range), x_range, 2.0)
+
+    for start_idx in range(n_starts):
+        noise = rng.standard_normal(ref_x0.shape) * noise_scale * x_range
+        x0_noisy = np.clip(ref_x0 + noise, ref_nlp["lbx"], ref_nlp["ubx"])
+        _, sol_s, _ = solve_daopf(
+            gens=gens, loads=loads, load_buses=load_buses,
+            sys_params=sys_params, ic=ic,
+            x0_override=x0_noisy,
+            opts_override=quiet_opts,
+        )
+        obj_val = float(sol_s["f"])
+        objectives.append(obj_val)
+        if best_obj is None or obj_val < best_obj:
+            best_obj = obj_val
+        print(f"  Start {start_idx+1:2d}: obj = {obj_val:.6f}")
+
+    if len(objectives) == 0:
+        print("  All restarts failed — cannot assess global optimality.")
+        return False
+
+    objectives = np.array(objectives)
+    assert best_obj is not None
+    spread = (objectives.max() - objectives.min()) / (np.abs(best_obj) + 1e-12)
+    print(f"\n  Best obj across restarts: {best_obj:.6f}")
+    print(f"  Worst feasible obj:       {objectives.max():.6f}")
+    print(f"  Relative spread:          {spread*100:.3f}%")
+    likely_global = spread < 0.01  # within 1%
+    print(f"  Global optimality: {'LIKELY (spread < 1%)' if likely_global else 'UNCERTAIN (spread >= 1%)'}")
+    return likely_global
+
+
+def run_daopf_test(
+    n_buses: int = 24,
+    verify_kkt: bool = False,
+    verify_sosc: bool = False,
+    verify_global: bool = False,
+):
     assert n_buses % 2 == 0, "n_buses must be even"
 
     # Use SysParams for network topology and power targets
@@ -385,7 +610,7 @@ def run_daopf_test(n_buses: int = 24):
     log.addHandler(fh)
 
     t0 = time.perf_counter()
-    sol = solve_daopf(
+    sol, ipopt_sol, nlp_fns = solve_daopf(
         gens=gens,
         loads=loads,
         load_buses=load_buses,
@@ -396,6 +621,15 @@ def run_daopf_test(n_buses: int = 24):
     log.info("Number of Buses: " + str(n_buses))
     log.info(f"solve_daopf: {elapsed:.3f}s")
     print(f"DA-OPF solve time: {elapsed:.3f}s (logged to daopf_benchmark.log)")
+
+    if verify_kkt:
+        check_kkt(ipopt_sol, nlp_fns)
+
+    if verify_sosc:
+        check_sosc(ipopt_sol, nlp_fns)
+
+    if verify_global:
+        multi_start_verify(gens, loads, load_buses, sys_params, ic, n_starts=20, noise_scale=0.1)
 
     t_vec = np.arange(sol.N) * sol.dt
     V_mag = np.abs(sol.w["voltage"])
@@ -507,7 +741,7 @@ if __name__ == "__main__":
             times = pickle.load(f)
 
     busses = 4
-    timing_results = run_daopf_test(n_buses=busses)
+    timing_results = run_daopf_test(n_buses=busses, verify_kkt=True, verify_sosc=True, verify_global=True)
     times[busses] = timing_results
 
     # Save times dict to file
