@@ -63,6 +63,29 @@ class ConstPowerLoad(Proxable):
 
 		return ret
 
+	def compute_residual(self, trajectory: Trajectory):
+		"""
+		Computes load constraint residuals for a given trajectory.
+		"""
+		N = trajectory.N
+		dt = trajectory.dt
+		V = trajectory.w["voltage"]
+		I = trajectory.w["current"]
+		
+		# S_actual = V * conj(I)
+		S_actual = V * np.conj(I)
+		
+		# S_target(t)
+		S_target = np.array([[self.S(k * dt) for k in range(N)]])
+		
+		# Residual is the complex difference
+		res_power = S_actual - S_target
+
+		return {
+			"power": res_power
+		}
+		
+
 
 def test_const_load_projection():
 	v = 2.5 + 1.5j

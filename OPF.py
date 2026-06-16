@@ -53,8 +53,10 @@ def solve_opf(sys_params: SysParams, post=False) -> dict:
 	# Power flow constraints:
 	Ybus = sys_params.Ybus
 	for bus in range(n_buses):
-		Pi = P[bus] if bus < n_gens else S_load.real
-		Qi = Q[bus] if bus < n_gens else S_load.imag
+		load_idx = bus - n_gens
+		S_load_bus = S_load[load_idx] if hasattr(S_load, '__len__') else S_load # type: ignore
+		Pi = P[bus] if bus < n_gens else float(np.real(S_load_bus))
+		Qi = Q[bus] if bus < n_gens else float(np.imag(S_load_bus))
 		for other_bus in range(n_buses):
 			g = np.real(Ybus[bus, other_bus])
 			b = np.imag(Ybus[bus, other_bus])

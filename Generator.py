@@ -190,6 +190,8 @@ class Generator(Proxable):
 
 		# Initial guess - improved initialization
 		# Start with measurement data and gradually adjust
+		# TODO Set delta and omega to be from problem data
+		# TODO Alternatively try caching previous solutions
 		delta_guess = np.zeros_like(V_traj_re[0, :])  # Start with zero angle deviations
 		omega_guess = np.ones((N,)) * self.ws
 		Tm_guess = np.ones((N,)) * self.Pc
@@ -210,6 +212,7 @@ class Generator(Proxable):
 		ubx[:, 1] = self.ws + 0.08
 		lbx[:, 9] = self.Pc_min
 		ubx[:, 9] = self.Pc_max
+		# TODO Move these into objective
 
 		# Solve NLP
 		# print("Solving NLP...")
@@ -280,3 +283,42 @@ class Generator(Proxable):
 		alg_im = E_im - self.Zd.real * I_im - self.Zd.imag * I_re - V_im
 
 		return ca.vertcat(alg_re, alg_im)
+
+	def compute_residual(self, trajectory: Trajectory):
+		"""
+		Computes generator dynamic constraint residuals for a given trajectory.
+		"""
+		N = trajectory.N
+		dt = trajectory.dt
+
+		V = trajectory.w["voltage"][0, :]
+		I = trajectory.w["current"][0, :]
+		delta = np.real(trajectory.w["delta"][0, :])
+		omega = np.real(trajectory.w["omega"][0, :])
+		Tm = np.real(trajectory.w["Tm"][0, :])
+		Pc = np.real(trajectory.w["Pc"][0, :])
+
+		# Compute Pe = Re(E * conj(I)) where E = E_mag * exp(j*(delta + delta0))
+		E = self.E * np.exp(1j * (delta + self.delta0))
+		Pe = np.real(E * np.conj(I))
+
+		# Derivatives
+		delta_dot = omega - self.ws
+		omega_dot = (Tm - Pe - self.D * (omega / self.ws - 1)) * self.ws / (2 * self.H)
+		Tm_dot = (-Tm + Pc - (1 / self.R) * (omega / self.ws - 1)) / self.Tsv
+
+		# Trapezoidal residuals
+		res_delta = delta[1:] - delta[:-1] - (dt / 2) * (delta_dot[1:] + delta_dot[:-1])
+		res_omega = omega[1:] - omega[:-1] - (dt / 2) * (omega_dot[1:] + omega_dot[:-1])
+		res_Tm = Tm[1:] - Tm[:-1] - (dt / 2) * (Tm_dot[1:] + Tm_dot[:-1])
+
+		# Algebraic residuals: E - Zd*I - V = 0
+		res_alg = E - self.Zd * I - V
+
+		return {
+			"delta": res_delta,
+			"omega": res_omega,
+			"Tm": res_Tm,
+			"algebraic": res_alg
+		}
+		

@@ -2,9 +2,38 @@ from Trajectory import Trajectory
 from Generator import Generator
 from ConstPowerLoad import ConstPowerLoad
 from Proxable import Proxable
+from abc import ABC, abstractmethod
 
+class BusBehaviours:
+	def __init__(self, gens: list[Generator], loads: list[ConstPowerLoad]):
+		self.gens = gens
+		self.loads = loads
+	
+	def compute_residuals(self, trajectory: Trajectory):
+		"""
+		Computes bus behaviour residuals for a given trajectory.
+		"""
+		residuals = {}
+		for i, gen in enumerate(self.gens):
+			gen_vars = ["voltage", "current", "delta", "omega", "Tm", "power", "Pc"]
+			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in gen_vars}, dtype=trajectory.dtype)
+			for v in gen_vars:
+				t.w[v] = trajectory.w[v][[i], :]
+			res = gen.compute_residual(t)
+			for k, v in res.items():
+				residuals[f"gen_{i}_{k}"] = v
 
-class BusBehaviours(Proxable):
+		for i, load in enumerate(self.loads, start=len(self.gens)):
+			load_vars = ["voltage", "current", "power"]
+			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in load_vars}, dtype=trajectory.dtype)
+			for v in load_vars:
+				t.w[v] = trajectory.w[v][[i], :]
+			res = load.compute_residual(t)
+			for k, v in res.items():
+				residuals[f"load_{i}_{k}"] = v
+		return residuals
+
+class BusBehavioursSerial(Proxable, BusBehaviours):
 	def __init__(self, gens: list[Generator], loads: list[ConstPowerLoad]):
 		self.gens = gens
 		self.loads = loads
@@ -17,7 +46,7 @@ class BusBehaviours(Proxable):
 			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in gen_vars}, dtype=trajectory.dtype)
 			for v in gen_vars:
 				t.w[v] = trajectory.w[v][[i], :]
-			projected_t = gen.prox(t)
+			projected_t = gen.prox(t, rho)
 			for v in gen_vars:
 				ret.w[v][[i], :] = projected_t.w[v]
 		for i, load in enumerate(self.loads, start=len(self.gens)):
@@ -26,14 +55,12 @@ class BusBehaviours(Proxable):
 			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in load_vars}, dtype=trajectory.dtype)
 			for v in load_vars:
 				t.w[v] = trajectory.w[v][[i], :]
-			projected_t = load.prox(t)
+			projected_t = load.prox(t, rho)
 			for v in load_vars:
 				ret.w[v][[i], :] = projected_t.w[v]
 		return ret
-	
 
-
-class BusBehavioursParallel(Proxable):
+class BusBehavioursParallel(Proxable, BusBehaviours):
 	def __init__(self, gens: list[Generator], loads: list[ConstPowerLoad]):
 		self.gens = gens
 		self.loads = loads

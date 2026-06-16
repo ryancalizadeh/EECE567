@@ -3,11 +3,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 import logging
+from typing import cast, List, Callable
 from SysParams import SysParams
 from Trajectory import Trajectory
 from Generator import Generator
 from ConstPowerLoad import ConstPowerLoad
-from BusBehaviours import BusBehaviours, BusBehavioursParallel
+from BusBehaviours import BusBehavioursSerial, BusBehavioursParallel
 from Objective import Objective
 from Proxable import Proxable
 from OPF import solve_opf, ic_from_opf
@@ -24,6 +25,23 @@ def rho_heuristic(iteration, rho_prev, r, s, tau=1.1, mu=10):
 		return rho_prev / tau
 	else:
 		return rho_prev
+	
+def base_callback(iteration, x, z, u, r, s):
+	if iteration % 10 == 0:
+		print(f"ADMM iteration {iteration+1}: primal residual = {r:.4e}, dual residual = {s:.4e}")
+
+def compute_cost(x: Trajectory, sys_params: SysParams):
+	"""
+	Compute the cost of a solution to the admm problem
+	"""
+
+	cost = 0
+	for i in range(sys_params.n_gens):
+		# P_gen = Re(V_i * conj(I_i))
+		P_gen = np.real(x.w["voltage"][i, :] * np.conj(x.w["current"][i, :]))
+		cost += np.sum(sys_params.gen_costs[i] * (P_gen**2))
+	return cost
+
 
 
 def admm(f: Proxable, g: Proxable, z0: Trajectory, rho=lambda i, prev, r, s: 2.0, threshold=1e-3, max_iterations=100, callback=None):
@@ -52,7 +70,11 @@ def admm(f: Proxable, g: Proxable, z0: Trajectory, rho=lambda i, prev, r, s: 2.0
 	rhos = [2.0]
 
 	for iteration in range(max_iterations-1):
-		rhos.append(rho(iteration, rhos[-1], rs[-1], ss[-1]))
+		new_rho = rho(iteration, rhos[-1], rs[-1], ss[-1])
+		rhos.append(new_rho)
+		# Rescale u when rho changes to keep λ = rho*u continuous
+		if new_rho != rhos[-2]:
+			us[-1] = us[-1] * (rhos[-2] / new_rho)
 		xs.append(f.prox(zs[-1] - us[-1], rhos[-1]))
 		zs.append(g.prox(xs[-1] + us[-1], rhos[-1]))
 		us.append(us[-1] + (xs[-1] - zs[-1]))
@@ -108,41 +130,32 @@ def test_const_load_projection_refactored():
 	print("test_const_load_projection_refactored PASSED")
 
 
-def admm_test(n_buses: int = 24, seq_and_parallel=True):
+def _setup_admm_problem(n_buses: int = 24):
+	"""Solve OPF, build generators/loads, and return everything needed to run ADMM."""
 	assert n_buses % 2 == 0, "n_buses must be even"
-	
-	# Initialize system parameters
+
 	sys_params = SysParams(n_buses)
 	n_buses = sys_params.n_buses
 	n_gens = sys_params.n_gens
 	n_loads = sys_params.n_loads
-	omega_s = sys_params.omega_s
 
-	# Solve static OPF to get feasible initial conditions
 	print("Solving static OPF for initial conditions...")
 	opf_sol = solve_opf(sys_params)
 	print(f"OPF solved with status: {opf_sol['status']}")
 
-	# Solve static OPF for post-increase ICs
 	print("Solving static OPF for post-increase initial conditions...")
 	opf_sol_post = solve_opf(sys_params, post=True)
-	print(f"OPF solved with status: {opf_sol['status']}")
+	print(f"OPF solved with status: {opf_sol_post['status']}")
 
-	# Extract initial conditions from OPF solution
-	S_gen0 = sys_params.S_gen0
-	S_load0 = sys_params.S_load0
 	S_init = np.concatenate([
-		np.full(n_gens, S_gen0),
-		np.full(n_loads, S_load0)
+		np.full(n_gens, sys_params.S_gen0),
+		np.full(n_loads, sys_params.S_load0),
 	])
 	ic = ic_from_opf(opf_sol, sys_params, S_init)
 	ic_post = ic_from_opf(opf_sol_post, sys_params, S_init)
 
-	# Verify IC feasibility
-	V_opf = ic['voltage']
-	I_opf = ic['current']
 	Ybus = sys_params.Ybus
-	kcl_residual = np.linalg.norm(Ybus @ V_opf - I_opf)
+	kcl_residual = np.linalg.norm(Ybus @ ic['voltage'] - ic['current'])
 	print(f"IC KCL residual: {kcl_residual:.4e}")
 	assert kcl_residual < 1e-3, f"OPF solution does not satisfy KCL: residual = {kcl_residual}"
 
@@ -150,40 +163,23 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	print(f"Power residual: {power_residual:.4e}")
 	assert power_residual < 1e-3, f"OPF solution does not match expected power injections: residual = {power_residual}"
 
-	# Extract generator parameters for instantiation
-	H = sys_params.H
-	D = sys_params.D
-	Tsv = sys_params.Tsv
-	RD = sys_params.Rd
 	X_p = sys_params.X_p
 	P_min = sys_params.P_min
 	P_max = sys_params.P_max
-	V_max = sys_params.V_max
-	gen_costs = sys_params.gen_costs
-
-	# Compute E_mags for Generator instantiation (from OPF IC)
-	E_complex = ic['voltage'][:n_gens] + 1j * X_p * ic['current'][:n_gens]
-	E_mags = np.abs(E_complex)
-	delta0s = ic['delta']
+	E_mags = np.abs(ic['voltage'][:n_gens] + 1j * X_p * ic['current'][:n_gens])
 	gens = [
-		Generator(E_mags[i], 1j*X_p, H, D, Tsv, RD, delta0s[i], ic['Tm'][i],
-		          ic['voltage'][i], ic['current'][i], ic['power'][i], 
+		Generator(E_mags[i], 1j*X_p, sys_params.H, sys_params.D, sys_params.Tsv, sys_params.Rd,
+		          ic['delta'][i], ic['Tm'][i], ic['voltage'][i], ic['current'][i], ic['power'][i],
 		          Pc_min=P_min[i], Pc_max=P_max[i])
 		for i in range(n_gens)
 	]
-	loads = [
-		ConstPowerLoad(
-			sys_params.get_load_power(j)
-		)
-		for j in range(n_loads)
-	]
+	loads = [ConstPowerLoad(sys_params.get_load_power(j)) for j in range(n_loads)]
 
 	def make_initial_traj():
 		t = Trajectory(sys_params.T, sys_params.dt, {
 			"voltage": n_buses, "current": n_buses, "power": n_buses,
 			"delta": n_gens, "omega": n_gens, "Tm": n_gens, "Pc": n_gens,
 		}, dtype=np.complex128)
-		# Use OPF-derived initial conditions
 		t.set_constant(["voltage"], list(ic['voltage']))
 		t.set_constant(["current"], list(ic['current']))
 		t.set_constant(["delta"],   list(ic['delta']))
@@ -191,16 +187,111 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 		t.set_constant(["Tm"],      list(ic['Tm']))
 		t.set_constant(["power"],   list(ic['power']))
 		t.set_constant(["Pc"],      list(ic['Pc']))
-
 		t.w["voltage"][:, sys_params.N_step:] = ic_post['voltage'].reshape(-1, 1)
 		t.w["current"][:, sys_params.N_step:] = ic_post['current'].reshape(-1, 1)
-		t.w["power"][:, sys_params.N_step:] = ic_post['power'].reshape(-1, 1)
-		t.w["delta"][:, sys_params.N_step:] = ic_post['delta'].reshape(-1, 1)
-		t.w["omega"][:, sys_params.N_step:] = ic_post['omega'].reshape(-1, 1)
-		t.w["Tm"][:, sys_params.N_step:] = ic_post['Tm'].reshape(-1, 1)
-		t.w["Pc"][:, sys_params.N_step:] = ic_post['Pc'].reshape(-1, 1)
-
+		t.w["power"][:, sys_params.N_step:]   = ic_post['power'].reshape(-1, 1)
+		t.w["delta"][:,  sys_params.N_step:]  = ic_post['delta'].reshape(-1, 1)
+		t.w["omega"][:,  sys_params.N_step:]  = ic_post['omega'].reshape(-1, 1)
+		t.w["Tm"][:,     sys_params.N_step:]  = ic_post['Tm'].reshape(-1, 1)
+		t.w["Pc"][:,     sys_params.N_step:]  = ic_post['Pc'].reshape(-1, 1)
 		return t
+
+	return dict(
+		sys_params=sys_params,
+		gens=gens,
+		loads=loads,
+		make_initial_traj=make_initial_traj,
+		Ybus=Ybus,
+		gen_costs=sys_params.gen_costs,
+		P_min=P_min,
+		P_max=P_max,
+		V_max=sys_params.V_max,
+	)
+
+
+def admm_threshold_sweep(n_buses: int = 24, n_thresholds: int = 5):
+	"""Run ADMM with logarithmically-spaced thresholds in [1e-3, 1e-2] and overlay the
+	resulting time-domain dynamics on a single figure to reveal any visual differences."""
+	setup = _setup_admm_problem(n_buses)
+	sys_params        = cast(SysParams, setup['sys_params'])
+	gens              = cast(list, setup['gens'])
+	loads             = cast(list, setup['loads'])
+	make_initial_traj = cast(Callable, setup['make_initial_traj'])
+	Ybus                 = cast(np.ndarray, setup['Ybus'])
+	gen_costs            = cast(np.ndarray, setup['gen_costs'])
+	P_min                = cast(np.ndarray, setup['P_min'])
+	P_max                = cast(np.ndarray, setup['P_max'])
+	V_max                = cast(np.ndarray, setup['V_max'])
+	n_gens               = cast(int, sys_params.n_gens)
+	omega_s              = cast(float, sys_params.omega_s)
+
+	thresholds = np.logspace(-3, -2, n_thresholds)
+	colors = plt.get_cmap('viridis')(np.linspace(0.1, 0.9, n_thresholds))
+
+	fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+	fig.suptitle(f"ADMM Threshold Sweep ({n_buses}-bus, thresholds {thresholds[0]:.1e}–{thresholds[-1]:.1e})")
+
+	for idx, threshold in enumerate(thresholds):
+		initial_traj = make_initial_traj()
+		Bi = BusBehavioursParallel(gens, loads)
+		obj = Objective(Ybus, gen_costs, P_min, P_max, V_max, initial_traj)
+		print(f"\nRunning ADMM with threshold={threshold:.2e}...")
+		result = admm(obj, Bi, initial_traj, rho=rho_heuristic, threshold=threshold, max_iterations=2000)
+
+		t_vec = np.arange(result.N) * result.dt
+		color = colors[idx]
+		label = f"ε={threshold:.2e}"
+
+		for i in range(n_gens):
+			lbl = label if i == 0 else None
+			axs[0, 0].plot(t_vec, np.real(result.w["omega"][i, :]), color=color, alpha=0.8, label=lbl)
+			axs[0, 1].plot(t_vec, np.degrees(np.real(result.w["delta"][i, :])), color=color, alpha=0.8, label=lbl)
+			axs[1, 0].plot(t_vec, np.real(result.w["Tm"][i, :]), color=color, alpha=0.8, label=lbl)
+
+		V_mag = np.abs(result.w["voltage"])
+		for bus in range(sys_params.n_buses):
+			lbl = label if bus == 0 else None
+			axs[1, 1].plot(t_vec, V_mag[bus, :], color=color, alpha=0.6, label=lbl)
+
+	axs[0, 0].axhline(omega_s, color='k', linestyle='--', linewidth=0.8, label="ωs")
+	axs[0, 0].set_ylabel("ω (rad/s)")
+	axs[0, 0].set_title("Rotor Speed")
+	axs[0, 0].set_ylim(omega_s - 0.1, omega_s + 0.1)
+
+	axs[0, 1].set_ylabel("δ (deg)")
+	axs[0, 1].set_title("Rotor Angle")
+
+	axs[1, 0].set_ylabel("Tm (pu)")
+	axs[1, 0].set_title("Mechanical Torque")
+
+	axs[1, 1].set_ylabel("|V| (pu)")
+	axs[1, 1].set_title("Bus Voltage Magnitudes")
+
+	for ax in axs.flat:
+		ax.set_xlabel("Time (s)")
+		ax.axvline(sys_params.N_step * sys_params.dt, color='r', linestyle=':', linewidth=0.8)
+		ax.grid(True)
+		ax.legend(fontsize=7)
+
+	plt.tight_layout()
+	plt.show()
+
+
+def admm_test(n_buses: int = 24, seq_and_parallel=True):
+	setup = _setup_admm_problem(n_buses)
+	sys_params = cast(SysParams, setup['sys_params'])
+	gens = cast(List[Generator], setup['gens'])
+	loads = cast(List[ConstPowerLoad], setup['loads'])
+	make_initial_traj = cast(Callable[[], Trajectory], setup['make_initial_traj'])
+	Ybus = cast(np.ndarray, setup['Ybus'])
+	gen_costs = cast(np.ndarray, setup['gen_costs'])
+	P_min = cast(np.ndarray, setup['P_min'])
+	P_max = cast(np.ndarray, setup['P_max'])
+	V_max = cast(np.ndarray, setup['V_max'])
+	n_buses = cast(int, sys_params.n_buses)
+	n_gens = cast(int, sys_params.n_gens)
+	n_loads = cast(int, sys_params.n_loads)
+	omega_s = cast(float, sys_params.omega_s)
 
 	log = logging.getLogger("admm_benchmark")
 	log.setLevel(logging.INFO)
@@ -220,7 +311,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	log.info("Number of Buses: " + str(n_buses))
 	test_cases = []
 	if seq_and_parallel:
-		test_cases.append(("BusBehaviours (sequential)", BusBehaviours(gens, loads)))
+		test_cases.append(("BusBehaviours (sequential)", BusBehavioursSerial(gens, loads)))
 	test_cases.append(("BusBehavioursParallel (threaded)", BusBehavioursParallel(gens, loads)))
 	
 	for label, Bi in test_cases:
@@ -230,11 +321,15 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 		dual_residuals = []
 		print(f"\nRunning ADMM with {label}...")
 		t0 = time.perf_counter()
-		result = admm(obj, Bi, initial_traj, rho=rho_heuristic, threshold=1e-3, max_iterations=2000, callback=make_cb(primal_residuals, dual_residuals))
+		result = admm(obj, Bi, initial_traj, rho=rho_heuristic, threshold=1e-3, max_iterations=100, callback=make_cb(primal_residuals, dual_residuals))
 		elapsed = time.perf_counter() - t0
 		timing_results[label] = {"time": elapsed, "iterations": len(primal_residuals), "result": result, "primal_residuals": primal_residuals, "dual_residuals": dual_residuals}
 		log.info(f"{label}: {elapsed:.3f}s over {len(primal_residuals)} iteration(s), final primal residual = {primal_residuals[-1]:.4e}, final dual residual = {dual_residuals[-1]:.4e}")
 		print(f"  -> {elapsed:.3f}s")
+		print(f"  -> {len(primal_residuals)} iterations")
+		print(f"  -> final primal residual = {primal_residuals[-1]:.4e}")
+		print(f"  -> final dual residual = {dual_residuals[-1]:.4e}")
+		print(f"  -> cost = {compute_cost(result, sys_params):.4e}")
 
 	if seq_and_parallel:
 		log.info(
@@ -355,6 +450,39 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	axs3[2].set_title("Load Power Constraint Residual")
 	axs3[2].grid(True)
 
+	# Fig 4: Bus Behaviour residuals. Plot the residuals for each generator together
+	fig4, axs4 = plt.subplots(2, 2, figsize=(14, 10))
+	fig4.suptitle(f"Bus Behaviour Residuals ({n_buses}-bus)")
+	
+	bus_res = Bi.compute_residuals(sol)
+	
+	# Plot generator dynamic residuals
+	for i in range(n_gens):
+		axs4[0, 0].semilogy(t_vec[1:], np.abs(bus_res[f"gen_{i}_delta"]), label=f"Gen {i+1}")
+		axs4[0, 1].semilogy(t_vec[1:], np.abs(bus_res[f"gen_{i}_omega"]), label=f"Gen {i+1}")
+		axs4[1, 0].semilogy(t_vec[1:], np.abs(bus_res[f"gen_{i}_Tm"]), label=f"Gen {i+1}")
+	
+	# Plot algebraic residuals (max over all buses)
+	alg_res_all = []
+	for i in range(n_gens):
+		alg_res_all.append(np.abs(bus_res[f"gen_{i}_algebraic"]).ravel())
+	for i in range(n_gens, n_buses):
+		alg_res_all.append(np.abs(bus_res[f"load_{i}_power"]).ravel())
+	
+	max_alg_res = np.max(alg_res_all, axis=0)
+	axs4[1, 1].semilogy(t_vec, max_alg_res, color='r', label="Max Algebraic Residual")
+
+	axs4[0, 0].set_title("Delta Dynamics Residual")
+	axs4[0, 1].set_title("Omega Dynamics Residual")
+	axs4[1, 0].set_title("Tm Dynamics Residual")
+	axs4[1, 1].set_title("Algebraic/Power Residuals")
+	
+	for ax in axs4.flat:
+		ax.set_xlabel("Time (s)")
+		ax.grid(True)
+		ax.legend(fontsize=7)
+		
+
 	plt.tight_layout()
 	plt.show()
 
@@ -379,6 +507,9 @@ if __name__ == "__main__":
 
 	timing_results = admm_test(n_buses=nbuses, seq_and_parallel=False)
 	times[nbuses] = timing_results
+
+	# admm_threshold_sweep(n_buses=nbuses, n_thresholds=5)
+	
 
 	# Save times dict to file
 	with open("admm_times.pkl", "wb") as f:

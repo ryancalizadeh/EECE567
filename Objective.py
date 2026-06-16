@@ -28,7 +28,8 @@ class Objective(Proxable):
 		self.Iw = cp.Parameter(self.I.shape, complex=True)
 		self.Sw = cp.Parameter(self.S.shape, complex=True)
 		self.Pcw = cp.Parameter((self.g, self.N))
-		self.rho = cp.Parameter(nonneg=True)
+		#self.rho = cp.Parameter(nonneg=True)
+		self.rho = 2.0
 
 		self.x = cp.vstack([self.V, self.I, self.S])
 		self.w = cp.vstack([self.Vw, self.Iw, self.Sw])
@@ -60,7 +61,8 @@ class Objective(Proxable):
 		self.Iw.value = trajectory.get_var_names(["current"])
 		self.Sw.value = trajectory.get_var_names(["power"])[:self.g, :]
 		self.Pcw.value = np.real(trajectory.get_var_names(["Pc"]))
-		self.rho.value = rho
+
+		#self.rho.value = rho
 
 		self.problem.solve()
 
