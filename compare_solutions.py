@@ -180,7 +180,7 @@ def main():
     # ---------------- ADMM ----------------
     print("\n================ ADMM ================")
     obj = Objective(sys_params.Ybus, sys_params.gen_costs, sys_params.P_min,
-                    sys_params.P_max, sys_params.V_max, init_traj)
+                    sys_params.P_max, sys_params.V_max, init_traj, omega_s=sys_params.omega_s)
     Bi = BusBehaviours(gens, loads)
     iters = {"n": 0, "r": np.nan, "s": np.nan}
 

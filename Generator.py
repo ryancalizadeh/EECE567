@@ -208,11 +208,6 @@ class Generator(Proxable):
 
 		lbx = np.full((N, n_vars), -np.inf)
 		ubx = np.full((N, n_vars), np.inf)
-		lbx[:, 1] = self.ws - 0.08
-		ubx[:, 1] = self.ws + 0.08
-		lbx[:, 9] = self.Pc_min
-		ubx[:, 9] = self.Pc_max
-		# TODO Move these into objective
 
 		# Solve NLP
 		# print("Solving NLP...")

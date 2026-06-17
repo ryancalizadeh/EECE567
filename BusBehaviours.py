@@ -2,6 +2,7 @@ from Trajectory import Trajectory
 from Generator import Generator
 from ConstPowerLoad import ConstPowerLoad
 from Proxable import Proxable
+import numpy as np
 from abc import ABC, abstractmethod
 
 class BusBehaviours:
@@ -32,6 +33,12 @@ class BusBehaviours:
 			for k, v in res.items():
 				residuals[f"load_{i}_{k}"] = v
 		return residuals
+	
+	def print_residuals(self, trajectory: Trajectory):
+		residuals = self.compute_residuals(trajectory)
+		for k, v in residuals.items():
+			print(f"{k}: {np.linalg.norm(v)}")
+
 
 class BusBehavioursSerial(Proxable, BusBehaviours):
 	def __init__(self, gens: list[Generator], loads: list[ConstPowerLoad]):

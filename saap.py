@@ -8,7 +8,7 @@ from SysParams import SysParams
 from Trajectory import Trajectory
 from Generator import Generator
 from ConstPowerLoad import ConstPowerLoad
-from BusBehaviours import BusBehavioursSerial, BusBehavioursParallel
+from BusBehaviours import BusBehavioursSerial, BusBehavioursParallel, BusBehaviours
 from Objective import Objective
 from Proxable import Proxable
 from OPF import solve_opf, ic_from_opf
@@ -75,9 +75,14 @@ def admm(f: Proxable, g: Proxable, z0: Trajectory, rho=lambda i, prev, r, s: 2.0
 		# Rescale u when rho changes to keep λ = rho*u continuous
 		if new_rho != rhos[-2]:
 			us[-1] = us[-1] * (rhos[-2] / new_rho)
+		# zs[-1].plot("Zs before proxing")
 		xs.append(f.prox(zs[-1] - us[-1], rhos[-1]))
+		# xs[-1].plot("Xs after proxing")	
 		zs.append(g.prox(xs[-1] + us[-1], rhos[-1]))
+		# zs[-1].plot("Zs after proxing")
 		us.append(us[-1] + (xs[-1] - zs[-1]))
+
+		(xs[-1] - zs[-1]).plot("Difference between Xs and Zs")
 
 		rs.append((xs[-1] - zs[-1]).norm())
 		ss.append(rhos[-1] * (zs[-1] - zs[-2]).norm())
@@ -175,7 +180,13 @@ def _setup_admm_problem(n_buses: int = 24):
 	]
 	loads = [ConstPowerLoad(sys_params.get_load_power(j)) for j in range(n_loads)]
 
-	def make_initial_traj():
+	def make_initial_traj(load_daopf_ics=False, **kwargs):
+		if load_daopf_ics and os.path.exists("daopf_sols.pkl"):
+			with open("daopf_sols.pkl", "rb") as f:
+				sols = pickle.load(f)
+				print("LOADING DAOPF SOLUTIONS")
+				return sols[n_buses]
+
 		t = Trajectory(sys_params.T, sys_params.dt, {
 			"voltage": n_buses, "current": n_buses, "power": n_buses,
 			"delta": n_gens, "omega": n_gens, "Tm": n_gens, "Pc": n_gens,
@@ -234,7 +245,7 @@ def admm_threshold_sweep(n_buses: int = 24, n_thresholds: int = 5):
 	for idx, threshold in enumerate(thresholds):
 		initial_traj = make_initial_traj()
 		Bi = BusBehavioursParallel(gens, loads)
-		obj = Objective(Ybus, gen_costs, P_min, P_max, V_max, initial_traj)
+		obj = Objective(Ybus, gen_costs, P_min, P_max, V_max, initial_traj, omega_s=omega_s)
 		print(f"\nRunning ADMM with threshold={threshold:.2e}...")
 		result = admm(obj, Bi, initial_traj, rho=rho_heuristic, threshold=threshold, max_iterations=2000)
 
@@ -277,7 +288,7 @@ def admm_threshold_sweep(n_buses: int = 24, n_thresholds: int = 5):
 	plt.show()
 
 
-def admm_test(n_buses: int = 24, seq_and_parallel=True):
+def admm_test(n_buses: int = 24, seq_and_parallel=True, load_daopf_ics=False, max_iterations=1000, threshold=1e-3):
 	setup = _setup_admm_problem(n_buses)
 	sys_params = cast(SysParams, setup['sys_params'])
 	gens = cast(List[Generator], setup['gens'])
@@ -309,19 +320,24 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 		return cb
 
 	log.info("Number of Buses: " + str(n_buses))
-	test_cases = []
+	test_cases: List[tuple[str, BusBehaviours]] = []
 	if seq_and_parallel:
 		test_cases.append(("BusBehaviours (sequential)", BusBehavioursSerial(gens, loads)))
 	test_cases.append(("BusBehavioursParallel (threaded)", BusBehavioursParallel(gens, loads)))
 	
 	for label, Bi in test_cases:
-		initial_traj = make_initial_traj()
-		obj = Objective(Ybus, gen_costs, P_min, P_max, V_max, initial_traj)
+		initial_traj = make_initial_traj(load_daopf_ics=load_daopf_ics) # type: ignore
+		Bi.print_residuals(initial_traj)
+		# ress = Bi.compute_residuals(initial_traj) # type: ignore
+		# # Plot gen_0_omega
+		# plt.plot(ress["gen_0_omega"])
+		# plt.show()
+		obj = Objective(Ybus, gen_costs, P_min, P_max, V_max, initial_traj, omega_s=omega_s)
 		primal_residuals = []
 		dual_residuals = []
 		print(f"\nRunning ADMM with {label}...")
 		t0 = time.perf_counter()
-		result = admm(obj, Bi, initial_traj, rho=rho_heuristic, threshold=1e-3, max_iterations=100, callback=make_cb(primal_residuals, dual_residuals))
+		result = admm(obj, Bi, initial_traj, rho=rho_heuristic, threshold=threshold, max_iterations=max_iterations, callback=make_cb(primal_residuals, dual_residuals)) # type: ignore
 		elapsed = time.perf_counter() - t0
 		timing_results[label] = {"time": elapsed, "iterations": len(primal_residuals), "result": result, "primal_residuals": primal_residuals, "dual_residuals": dual_residuals}
 		log.info(f"{label}: {elapsed:.3f}s over {len(primal_residuals)} iteration(s), final primal residual = {primal_residuals[-1]:.4e}, final dual residual = {dual_residuals[-1]:.4e}")
@@ -454,7 +470,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 	fig4, axs4 = plt.subplots(2, 2, figsize=(14, 10))
 	fig4.suptitle(f"Bus Behaviour Residuals ({n_buses}-bus)")
 	
-	bus_res = Bi.compute_residuals(sol)
+	bus_res = Bi.compute_residuals(sol) # type: ignore
 	
 	# Plot generator dynamic residuals
 	for i in range(n_gens):
@@ -481,9 +497,27 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True):
 		ax.set_xlabel("Time (s)")
 		ax.grid(True)
 		ax.legend(fontsize=7)
-		
-
 	plt.tight_layout()
+
+	# Figure 5: Pc
+	fig5, axs5 = plt.subplots(2, 1, figsize=(10, 6))
+	fig5.suptitle(f"Governor Power Setpoint ({n_buses}-bus)")
+	for i in range(n_gens):
+		axs5[0].plot(t_vec, np.real(sol.w["Pc"][i, :]), label=f"Gen {i+1}")
+	axs5[0].set_ylabel("Pc (pu)")
+	axs5[0].set_title("Governor Power Setpoint")
+	axs5[0].legend(fontsize=7)
+	axs5[0].grid(True)
+
+	for i in range(n_gens):
+		axs5[1].plot(t_vec, np.real(sol.w["Pc"][i, :]) - np.real(sol.w["Pc"][i, 0]), label=f"Gen {i+1}")
+	axs5[1].set_ylabel("ΔPc (pu)")
+	axs5[1].set_title("Change in Power Setpoint")
+	axs5[1].set_xlabel("Time (s)")
+	axs5[1].legend(fontsize=7)
+	axs5[1].grid(True)
+	plt.tight_layout()
+	
 	plt.show()
 
 	return timing_results
@@ -505,7 +539,7 @@ if __name__ == "__main__":
 
 	nbuses = 4
 
-	timing_results = admm_test(n_buses=nbuses, seq_and_parallel=False)
+	timing_results = admm_test(n_buses=nbuses, seq_and_parallel=False, load_daopf_ics=True, max_iterations=600, threshold=1e-3)
 	times[nbuses] = timing_results
 
 	# admm_threshold_sweep(n_buses=nbuses, n_thresholds=5)

@@ -8,7 +8,7 @@ class Objective(Proxable):
 	A class reprsenting the minimization of generation cost subject to operational constraints and linear network behaviour
 	"""
 
-	def __init__(self, Ybus, gen_costs, P_min, P_max, V_max, t: Trajectory):
+	def __init__(self, Ybus, gen_costs, P_min, P_max, V_max, t: Trajectory, omega_s: float = 2*3.141592653589793*60, omega_band: float = 0.08):
 		self.Ybus = Ybus
 		self.gen_costs = gen_costs
 		self.N = t.N
@@ -24,10 +24,12 @@ class Objective(Proxable):
 		self.I = cp.Variable((Ybus.shape[0], self.N), complex=True)
 		self.S = cp.Variable((self.g, self.N), complex=True)
 		self.Pc_var = cp.Variable((self.g, self.N))
+		self.omega = cp.Variable((self.g, self.N))
 		self.Vw = cp.Parameter(self.V.shape, complex=True)
 		self.Iw = cp.Parameter(self.I.shape, complex=True)
 		self.Sw = cp.Parameter(self.S.shape, complex=True)
 		self.Pcw = cp.Parameter((self.g, self.N))
+		self.omegaw = cp.Parameter((self.g, self.N))
 		#self.rho = cp.Parameter(nonneg=True)
 		self.rho = 2.0
 
@@ -41,8 +43,11 @@ class Objective(Proxable):
 		# Self.penalty = rho * ||x-w||_2^2, recalling that these are complex numbers
 		self.penalty = self.rho/2 * cp.sum_squares(self.x - self.w)
 		self.Pc_penalty = self.rho/2 * cp.sum_squares(self.Pc_var - self.Pcw)
+		self.omega_penalty = self.rho/2 * cp.sum_squares(self.omega - self.omegaw)
 
 		# TODO: Verify that optimization problem is the same as DAOPF formulation
+
+		omega_s_arr = np.full((self.g, 1), omega_s)
 
 		self.constraints = [self.Ybus @ self.V == self.I]
 		self.constraints.append(cp.real(self.S) >= P_min)
@@ -50,10 +55,12 @@ class Objective(Proxable):
 		self.constraints.append(cp.abs(self.V) <= V_max)
 		self.constraints.append(self.Pc_var >= P_min)
 		self.constraints.append(self.Pc_var <= P_max)
+		self.constraints.append(self.omega >= omega_s_arr - omega_band)
+		self.constraints.append(self.omega <= omega_s_arr + omega_band)
 
 		# TODO Add line current limits
 
-		self.problem = cp.Problem(cp.Minimize(self.cost + self.penalty + self.Pc_penalty), self.constraints)
+		self.problem = cp.Problem(cp.Minimize(self.cost + self.penalty + self.Pc_penalty + self.omega_penalty), self.constraints)
 		
 
 	def prox(self, trajectory: Trajectory, rho: float = 1.0) -> Trajectory:
@@ -61,6 +68,7 @@ class Objective(Proxable):
 		self.Iw.value = trajectory.get_var_names(["current"])
 		self.Sw.value = trajectory.get_var_names(["power"])[:self.g, :]
 		self.Pcw.value = np.real(trajectory.get_var_names(["Pc"]))
+		self.omegaw.value = np.real(trajectory.get_var_names(["omega"]))
 
 		#self.rho.value = rho
 
@@ -77,6 +85,8 @@ class Objective(Proxable):
 			ret.w["power"][:self.g, :] = self.S.value
 		if self.Pc_var.value is not None:
 			ret.w["Pc"][:self.g, :] = self.Pc_var.value
+		if self.omega.value is not None:
+			ret.w["omega"][:self.g, :] = self.omega.value
 
 		if self.problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
 			print(f"Optimization failed with status {self.problem.status}")

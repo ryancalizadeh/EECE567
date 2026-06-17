@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 class Trajectory:
 	"""
@@ -145,3 +146,42 @@ class Trajectory:
 		# Concatenate all variable trajectories into a single array and compute the norm
 		all_vars = np.vstack(list(self.w.values()))
 		return np.linalg.norm(all_vars)
+	
+	def plot(self, title="Trajectory"):
+		"""
+		Plots the trajectory. Each variable is plotted on a seperate subplot. If self.dtype is complex, the real and imaginary parts are plotted on horizontally offset subplots.
+		"""
+		num_vars = len(self.vars)
+		t_vec = np.arange(self.N) * self.dt
+		
+		if np.iscomplexobj(np.zeros(1, dtype=self.dtype)):
+			fig, axs = plt.subplots(num_vars, 2, figsize=(12, 3 * num_vars), squeeze=False)
+			fig.suptitle(title)
+			for i, (var_name, data) in enumerate(self.w.items()):
+				# Real part
+				for row in range(data.shape[0]):
+					axs[i, 0].plot(t_vec, np.real(data[row, :]), label=f"{var_name}[{row}]")
+				axs[i, 0].set_title(f"Real: {var_name}")
+				axs[i, 0].grid(True)
+				axs[i, 0].legend(fontsize=8)
+				
+				# Imaginary part
+				for row in range(data.shape[0]):
+					axs[i, 1].plot(t_vec, np.imag(data[row, :]), label=f"{var_name}[{row}]")
+				axs[i, 1].set_title(f"Imag: {var_name}")
+				axs[i, 1].grid(True)
+				axs[i, 1].legend(fontsize=8)
+		else:
+			fig, axs = plt.subplots(num_vars, 1, figsize=(8, 3 * num_vars), squeeze=False)
+			fig.suptitle(title)
+			for i, (var_name, data) in enumerate(self.w.items()):
+				for row in range(data.shape[0]):
+					axs[i, 0].plot(t_vec, data[row, :], label=f"{var_name}[{row}]")
+				axs[i, 0].set_title(var_name)
+				axs[i, 0].grid(True)
+				axs[i, 0].legend(fontsize=8)
+		
+		plt.tight_layout()
+		plt.show()
+		
+		

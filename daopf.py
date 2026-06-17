@@ -160,7 +160,6 @@ def solve_daopf(
         # eq(omega[-1] - omega[-2])
         # eq(Tm[-1] - Tm[-2])
 
-
         # ODE: trapezoidal rule for k = 0..N-2
         for k in range(N - 1):
             # --- delta_dot = omega - omega_s ---
@@ -727,9 +726,30 @@ def run_daopf_test(
     axs3[1].grid(True)
 
     plt.tight_layout()
+    
+    # Figure 4: Pc
+    fig4, axs4 = plt.subplots(2, 1, figsize=(10, 6))
+    fig4.suptitle("DA-OPF (Centralized) — Pc")
+    for i in range(n_gens):
+        axs4[0].plot(t_vec, np.real(sol.w["Pc"][i, :]), label=f"Gen {i+1}")
+    axs4[0].set_ylabel("Pc (pu)")
+    axs4[0].set_title("Governor Power Setpoint")
+    axs4[0].legend(fontsize=7)
+    axs4[0].grid(True)
+
+    for i in range(n_gens):
+        axs4[1].plot(t_vec, np.real(sol.w["Pc"][i, :]) - np.real(sol.w["Pc"][i, 0]), label=f"Gen {i+1}")
+    axs4[1].set_ylabel("ΔPc (pu)")
+    axs4[1].set_title("Change in Power Setpoint")
+    axs4[1].set_xlabel("Time (s)")
+    axs4[1].legend(fontsize=7)
+    axs4[1].grid(True)
+    plt.tight_layout()
+    
+
     plt.show()
 
-    return elapsed
+    return elapsed, sol
 
 
 if __name__ == "__main__":
@@ -741,10 +761,20 @@ if __name__ == "__main__":
             times = pickle.load(f)
 
     busses = 4
-    timing_results = run_daopf_test(n_buses=busses, verify_kkt=True, verify_sosc=True, verify_global=True)
+    timing_results, sol = run_daopf_test(n_buses=busses, verify_kkt=True, verify_sosc=False, verify_global=False)
     times[busses] = timing_results
 
     # Save times dict to file
     import pickle
     with open("daopf_times.pkl", "wb") as f:
         pickle.dump(times, f)
+    
+    # Save Trajectory solution to file
+    sols = {}
+    if os.path.exists("daopf_sols.pkl"):
+        with open("daopf_sols.pkl", "rb") as f:
+            sols = pickle.load(f)
+    sols[busses] = sol
+    # Save sols dict to file
+    with open("daopf_sols.pkl", "wb") as f:
+        pickle.dump(sols, f)

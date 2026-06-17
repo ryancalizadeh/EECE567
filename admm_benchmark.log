@@ -166,3 +166,27 @@
 2026-06-15 22:20:12,418 BusBehavioursParallel (threaded): 0.980s over 1 iteration(s), final primal residual = 2.7557e+00, final dual residual = 3.4137e+00
 2026-06-15 22:21:38,257 Number of Buses: 4
 2026-06-15 22:23:05,898 BusBehavioursParallel (threaded): 87.638s over 99 iteration(s), final primal residual = 4.1030e-02, final dual residual = 8.3240e-02
+2026-06-16 12:43:07,538 Number of Buses: 4
+2026-06-16 12:53:07,810 BusBehavioursParallel (threaded): 600.267s over 781 iteration(s), final primal residual = 9.9932e-04, final dual residual = 9.6020e-04
+2026-06-16 13:32:08,924 Number of Buses: 4
+2026-06-16 13:32:52,807 Number of Buses: 4
+2026-06-16 13:34:09,341 Number of Buses: 4
+2026-06-16 13:34:19,520 Number of Buses: 4
+2026-06-16 13:34:20,290 BusBehavioursParallel (threaded): 0.767s over 1 iteration(s), final primal residual = 2.3437e+00, final dual residual = 2.3041e+00
+2026-06-16 13:35:55,974 Number of Buses: 4
+2026-06-16 13:35:58,836 BusBehavioursParallel (threaded): 2.860s over 4 iteration(s), final primal residual = 8.4890e-01, final dual residual = 1.4349e+00
+2026-06-16 13:37:24,054 Number of Buses: 4
+2026-06-16 13:47:40,840 BusBehavioursParallel (threaded): 616.783s over 845 iteration(s), final primal residual = 9.1519e-04, final dual residual = 9.8753e-04
+2026-06-16 14:16:37,091 Number of Buses: 4
+2026-06-16 14:17:47,008 BusBehavioursParallel (threaded): 69.918s over 99 iteration(s), final primal residual = 4.0572e-02, final dual residual = 8.3629e-02
+2026-06-16 14:35:56,486 Number of Buses: 4
+2026-06-16 14:38:34,419 BusBehavioursParallel (threaded): 157.930s over 99 iteration(s), final primal residual = 4.0572e-02, final dual residual = 8.3629e-02
+2026-06-16 14:40:24,021 Number of Buses: 4
+2026-06-16 14:41:57,611 Number of Buses: 4
+2026-06-16 14:42:10,118 Number of Buses: 4
+2026-06-16 14:43:42,536 Number of Buses: 4
+2026-06-16 15:10:07,299 Number of Buses: 4
+2026-06-16 15:14:39,130 Number of Buses: 4
+2026-06-16 15:31:05,245 Number of Buses: 4
+2026-06-16 15:43:39,955 BusBehavioursParallel (threaded): 754.663s over 599 iteration(s), final primal residual = 1.2213e-03, final dual residual = 1.5688e-03
+2026-06-16 16:02:49,253 Number of Buses: 4
