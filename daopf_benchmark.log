@@ -167,3 +167,45 @@
 2026-06-16 13:26:03,263 solve_daopf: 1.226s
 2026-06-16 15:28:08,984 Number of Buses: 4
 2026-06-16 15:28:08,986 solve_daopf: 2.093s
+2026-06-18 13:58:33,981 Number of Buses: 4
+2026-06-18 13:58:33,982 solve_daopf: 1.696s
+2026-06-18 14:30:52,547 Number of Buses: 4
+2026-06-18 14:30:52,547 solve_daopf: 1.677s
+2026-06-18 14:31:39,375 Number of Buses: 4
+2026-06-18 14:31:39,375 solve_daopf: 1.413s
+2026-06-18 14:35:43,231 Number of Buses: 4
+2026-06-18 14:35:43,231 solve_daopf: 1.441s
+2026-06-18 14:49:48,820 Number of Buses: 4
+2026-06-18 14:49:48,820 solve_daopf: 1.441s
+2026-06-18 14:50:11,306 Number of Buses: 4
+2026-06-18 14:50:11,306 solve_daopf: 1.354s
+2026-06-18 14:52:31,787 Number of Buses: 4
+2026-06-18 14:52:31,787 solve_daopf: 1.667s
+2026-06-19 08:51:36,336 Number of Buses: 4
+2026-06-19 08:51:36,337 solve_daopf: 1.454s
+2026-06-22 09:40:26,787 Number of Buses: 4
+2026-06-22 09:40:26,787 solve_daopf: 1.360s
+2026-06-22 10:03:31,170 Number of Buses: 4
+2026-06-22 10:03:31,170 solve_daopf: 1.365s
+2026-06-22 10:03:38,136 Condition number - Jacobian: shape=(3402, 2400) sigma_min=6.673e-10 sigma_max=7.016e+01 cond=1.051e+11
+2026-06-22 10:03:38,136 Condition number - Hessian: shape=(2400, 2400) sigma_min=2.799e-05 sigma_max=7.463e+00 cond=2.666e+05
+2026-06-23 11:50:11,016 Number of Buses: 4
+2026-06-23 11:50:11,017 solve_daopf: 1.343s
+2026-06-23 11:50:28,715 Number of Buses: 4
+2026-06-23 11:50:28,715 solve_daopf: 1.395s
+2026-06-23 11:56:40,860 Number of Buses: 4
+2026-06-23 11:56:40,860 solve_daopf: 2.331s
+2026-06-23 11:56:47,700 Condition number - Jacobian: shape=(3405, 2400) sigma_min=2.750e-10 sigma_max=7.016e+01 cond=2.552e+11
+2026-06-23 11:56:47,701 Condition number - Hessian: shape=(2400, 2400) sigma_min=2.437e-07 sigma_max=4.425e+06 cond=1.816e+13
+2026-06-23 12:08:37,465 Number of Buses: 4
+2026-06-23 12:08:37,465 solve_daopf: 2.431s
+2026-06-23 12:08:44,313 Condition number - Jacobian: shape=(3405, 2400) sigma_min=2.750e-10 sigma_max=7.016e+01 cond=2.552e+11
+2026-06-23 12:08:44,313 Condition number - Hessian: shape=(2400, 2400) sigma_min=2.437e-07 sigma_max=4.425e+06 cond=1.816e+13
+2026-06-23 12:09:25,880 Number of Buses: 4
+2026-06-23 12:09:25,880 solve_daopf: 1.439s
+2026-06-23 12:09:32,951 Condition number - Jacobian: shape=(3405, 2400) sigma_min=1.686e-12 sigma_max=7.016e+01 cond=4.162e+13
+2026-06-23 12:09:32,951 Condition number - Hessian: shape=(2400, 2400) sigma_min=2.477e-05 sigma_max=9.301e+07 cond=3.755e+12
+2026-06-23 12:10:14,774 Number of Buses: 4
+2026-06-23 12:10:14,775 solve_daopf: 1.562s
+2026-06-23 12:10:21,420 Condition number - Jacobian: shape=(3402, 2400) sigma_min=6.673e-10 sigma_max=7.016e+01 cond=1.051e+11
+2026-06-23 12:10:21,421 Condition number - Hessian: shape=(2400, 2400) sigma_min=7.454e-07 sigma_max=7.463e+00 cond=1.001e+07

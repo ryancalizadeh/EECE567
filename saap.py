@@ -82,7 +82,7 @@ def admm(f: Proxable, g: Proxable, z0: Trajectory, rho=lambda i, prev, r, s: 2.0
 		# zs[-1].plot("Zs after proxing")
 		us.append(us[-1] + (xs[-1] - zs[-1]))
 
-		(xs[-1] - zs[-1]).plot("Difference between Xs and Zs")
+		# (xs[-1] - zs[-1]).plot("Difference between Xs and Zs")
 
 		rs.append((xs[-1] - zs[-1]).norm())
 		ss.append(rhos[-1] * (zs[-1] - zs[-2]).norm())
@@ -190,7 +190,7 @@ def _setup_admm_problem(n_buses: int = 24):
 		t = Trajectory(sys_params.T, sys_params.dt, {
 			"voltage": n_buses, "current": n_buses, "power": n_buses,
 			"delta": n_gens, "omega": n_gens, "Tm": n_gens, "Pc": n_gens,
-		}, dtype=np.complex128)
+		}, dtype=np.complex64)
 		t.set_constant(["voltage"], list(ic['voltage']))
 		t.set_constant(["current"], list(ic['current']))
 		t.set_constant(["delta"],   list(ic['delta']))
@@ -520,7 +520,7 @@ def admm_test(n_buses: int = 24, seq_and_parallel=True, load_daopf_ics=False, ma
 	
 	plt.show()
 
-	return timing_results
+	return timing_results, sol
 
 
 
@@ -539,7 +539,7 @@ if __name__ == "__main__":
 
 	nbuses = 4
 
-	timing_results = admm_test(n_buses=nbuses, seq_and_parallel=False, load_daopf_ics=True, max_iterations=600, threshold=1e-3)
+	timing_results, sol = admm_test(n_buses=nbuses, seq_and_parallel=False, load_daopf_ics=False, max_iterations=1000, threshold=1e-3)
 	times[nbuses] = timing_results
 
 	# admm_threshold_sweep(n_buses=nbuses, n_thresholds=5)
@@ -548,4 +548,13 @@ if __name__ == "__main__":
 	# Save times dict to file
 	with open("admm_times.pkl", "wb") as f:
 		pickle.dump(times, f)
-			
+	
+	# Save Trajectory solution to file
+	sols = {}
+	if os.path.exists("admm_sols.pkl"):
+		with open("admm_sols.pkl", "rb") as f:
+			sols = pickle.load(f)
+	sols[nbuses] = sol
+	# Save sols dict to file
+	with open("admm_sols.pkl", "wb") as f:
+		pickle.dump(sols, f)

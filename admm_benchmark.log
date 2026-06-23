@@ -190,3 +190,7 @@
 2026-06-16 15:31:05,245 Number of Buses: 4
 2026-06-16 15:43:39,955 BusBehavioursParallel (threaded): 754.663s over 599 iteration(s), final primal residual = 1.2213e-03, final dual residual = 1.5688e-03
 2026-06-16 16:02:49,253 Number of Buses: 4
+2026-06-18 14:00:37,571 Number of Buses: 4
+2026-06-18 14:01:53,622 Number of Buses: 4
+2026-06-18 14:02:36,707 Number of Buses: 4
+2026-06-18 14:16:58,799 BusBehavioursParallel (threaded): 862.087s over 846 iteration(s), final primal residual = 9.2718e-04, final dual residual = 9.6703e-04
