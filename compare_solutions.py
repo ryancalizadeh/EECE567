@@ -190,7 +190,7 @@ def main():
             print(f"  ADMM iter {iteration+1}: r = {r:.4e}, s = {s:.4e}")
 
     t0 = time.perf_counter()
-    traj_a = admm(obj, Bi, init_traj, rho=rho_heuristic,
+    traj_a = admm(obj, Bi, init_traj, rho=rho_heuristic, # type: ignore
                   threshold=ADMM_THRESHOLD, max_iterations=ADMM_MAX_ITER, callback=cb)
     print(f"ADMM: {time.perf_counter()-t0:.1f}s, {iters['n']} iterations, "
           f"final r = {iters['r']:.4e}, s = {iters['s']:.4e}")

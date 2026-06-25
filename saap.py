@@ -82,7 +82,7 @@ def admm(f: Proxable, g: Proxable, z0: Trajectory, rho=lambda i, prev, r, s: 2.0
 		# zs[-1].plot("Zs after proxing")
 		us.append(us[-1] + (xs[-1] - zs[-1]))
 
-		(xs[-1] - zs[-1]).plot("Difference between Xs and Zs")
+		# (xs[-1] - zs[-1]).plot("Difference between Xs and Zs")
 
 		rs.append((xs[-1] - zs[-1]).norm())
 		ss.append(rhos[-1] * (zs[-1] - zs[-2]).norm())
@@ -539,7 +539,13 @@ if __name__ == "__main__":
 
 	nbuses = 4
 
-	timing_results = admm_test(n_buses=nbuses, seq_and_parallel=False, load_daopf_ics=True, max_iterations=600, threshold=1e-3)
+	timing_results = admm_test(
+		n_buses=nbuses,
+		seq_and_parallel=False,
+		load_daopf_ics=False,
+		max_iterations=600,
+		threshold=1e-3
+	)
 	times[nbuses] = timing_results
 
 	# admm_threshold_sweep(n_buses=nbuses, n_thresholds=5)
