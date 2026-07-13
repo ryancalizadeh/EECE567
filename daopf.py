@@ -250,7 +250,7 @@ def solve_daopf(
     obj = 0
     for i, c in enumerate(gen_costs):
         for k in range(N):
-            P_gen = V_re[i, k] * I_re[i, k] + V_im[i, k] * I_im[i, k]
+            P_gen = Tms[i][k]  # Use mechanical torque as a proxy for generated power
             obj += c * P_gen**2
 
     # ------------------------------------------------------------------ #
@@ -852,7 +852,8 @@ if __name__ == "__main__":
 
     busses = 4
     timing_results, sol = run_daopf_test(
-        n_buses=busses, verify_kkt=True,
+        n_buses=busses,
+        verify_kkt=True,
         verify_sosc=False,
         verify_global=False,
         verify_condition=True,
