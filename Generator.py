@@ -12,7 +12,8 @@ class Generator(Proxable):
 	A class implementing projections onto a single classical generator + fast governor behaviour
 	"""
 
-	def __init__(self, E, Zd, H, D, Tsv, R, delta0, Pc, V0, I0, S0, max_iter=20, tol=1e-5, Pc_min=-np.inf, Pc_max=np.inf):
+	def __init__(self, E, Zd, H, D, Tsv, R, delta0, Pc, V0, I0, S0, max_iter=20, tol=1e-5, Pc_min=-np.inf, Pc_max=np.inf, weights: dict | None = None):
+		self.weights = weights if weights is not None else {"voltage": 1.0, "current": 1.0, "power": 1.0, "Pc": 1.0, "omega": 1.0, "delta": 1.0, "Tm": 1.0}
 		self.E = E
 		self.Zd = Zd
 		self.H = H
@@ -168,8 +169,15 @@ class Generator(Proxable):
 		lbg = np.zeros(constraints_vec.shape[0])
 		ubg = np.zeros(constraints_vec.shape[0])
 
-		# Objective function: minimize ||w - trajectory||_2^2
-		obj = ca.sumsqr(V_re - V_traj_re) + ca.sumsqr(V_im - V_traj_im) + ca.sumsqr(I_re - I_traj_re) + ca.sumsqr(I_im - I_traj_im) + ca.sumsqr(omega - omega_traj) + ca.sumsqr(Tm - Tm_traj) + ca.sumsqr(delta - delta_traj) + ca.sumsqr(P - P_traj) + ca.sumsqr(Q - Q_traj) + ca.sumsqr(Pc - Pc_traj)
+		# Objective function: minimize weighted ||w - trajectory||_2^2, D_v per variable block
+		D = self.weights
+		obj = D["voltage"] * (ca.sumsqr(V_re - V_traj_re) + ca.sumsqr(V_im - V_traj_im)) \
+			+ D["current"] * (ca.sumsqr(I_re - I_traj_re) + ca.sumsqr(I_im - I_traj_im)) \
+			+ D["omega"] * ca.sumsqr(omega - omega_traj) \
+			+ D["Tm"] * ca.sumsqr(Tm - Tm_traj) \
+			+ D["delta"] * ca.sumsqr(delta - delta_traj) \
+			+ D["power"] * (ca.sumsqr(P - P_traj) + ca.sumsqr(Q - Q_traj)) \
+			+ D["Pc"] * ca.sumsqr(Pc - Pc_traj)
 
 
 		opts = {

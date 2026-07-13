@@ -7,6 +7,7 @@ class SysParams:
 	"""
 	def __init__(self, n_buses: int):
 		self.omega_s = 2*np.pi*60
+		self.omega_band = 0.08
 		self.n_buses = n_buses
 		self.n_gens = n_buses // 2
 		self.n_loads = n_buses // 2
@@ -48,6 +49,23 @@ class SysParams:
 
 		# Build Ybus matrix with two rings + cross-links topology
 		self.Ybus = self._build_ybus()
+
+	def precondition_weights(self) -> dict[str, float]:
+		"""
+		Per-variable diagonal preconditioning weights for ADMM consensus penalties.
+		omega only varies by +/- omega_band around omega_s, unlike the other
+		O(1)-scale variables, so its penalty needs a much larger weight to be
+		comparably stiff.
+		"""
+		return {
+			"voltage": 1.0,
+			"current": 1.0,
+			"power": 1.0,
+			"Pc": 1.0,
+			"omega": 1.0 / self.omega_band,
+			"delta": 1.0,
+			"Tm": 1.0,
+		}
 
 	def get_load_power(self, j: int):
 		"""Returns load power as a function of time."""

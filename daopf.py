@@ -250,8 +250,9 @@ def solve_daopf(
     obj = 0
     for i, c in enumerate(gen_costs):
         for k in range(N):
-            P_gen = V_re[i, k] * I_re[i, k] + V_im[i, k] * I_im[i, k]
-            obj += c * P_gen**2
+            # P_gen = V_re[i, k] * I_re[i, k] + V_im[i, k] * I_im[i, k]
+            # obj += c * P_gen**2
+            obj += c * Tms[i][k]**2
 
     # ------------------------------------------------------------------ #
     # Warm start: steady-state initial conditions

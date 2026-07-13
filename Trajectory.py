@@ -146,6 +146,12 @@ class Trajectory:
 		# Concatenate all variable trajectories into a single array and compute the norm
 		all_vars = np.vstack(list(self.w.values()))
 		return np.linalg.norm(all_vars)
+
+	def weighted_norm(self, weights: dict):
+		# Like norm(), but scales each variable block by sqrt(weight) first, so the
+		# result is consistent with a rho/2 * weight * ||.||^2 penalty per block.
+		all_vars = np.vstack([np.sqrt(weights[var_name]) * data for var_name, data in self.w.items()])
+		return np.linalg.norm(all_vars)
 	
 	def plot(self, title="Trajectory"):
 		"""

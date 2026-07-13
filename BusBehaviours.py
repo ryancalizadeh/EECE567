@@ -82,7 +82,7 @@ class BusBehavioursParallel(Proxable, BusBehaviours):
 			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in gen_vars}, dtype=trajectory.dtype)
 			for v in gen_vars:
 				t.w[v] = trajectory.w[v][[i], :]
-			projected_t = gen.prox(t)
+			projected_t = gen.prox(t, rho)
 			return i, gen_vars, projected_t
 
 		def project_load(args):
@@ -92,7 +92,7 @@ class BusBehavioursParallel(Proxable, BusBehaviours):
 			t = Trajectory(trajectory.T, trajectory.dt, {v: 1 for v in load_vars}, dtype=trajectory.dtype)
 			for v in load_vars:
 				t.w[v] = trajectory.w[v][[i], :]
-			projected_t = load.prox(t)
+			projected_t = load.prox(t, rho)
 			return i, load_vars, projected_t
 
 		from concurrent.futures import ThreadPoolExecutor
