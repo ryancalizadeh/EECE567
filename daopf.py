@@ -853,7 +853,8 @@ if __name__ == "__main__":
 
     busses = 4
     timing_results, sol = run_daopf_test(
-        n_buses=busses, verify_kkt=True,
+        n_buses=busses,
+        verify_kkt=True,
         verify_sosc=False,
         verify_global=False,
         verify_condition=True,
