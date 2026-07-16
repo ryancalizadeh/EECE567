@@ -150,6 +150,71 @@ class ConstPowerLoad(Proxable):
 
         return ret
 
+class ConstPowerLoadSDP(Proxable):
+    """
+    Exactly like ConstPowerLoad, except the projection is computed via an SDP
+    relaxation. With x = (V_re, V_im, I_re, I_im) the bilinear power
+    constraints and the nonconvex lower voltage bound are linear in the lifted
+    matrix X = x x^T, and X = x x^T is relaxed to X >= x x^T, encoded as the
+    PSD matrix M = [[X, x], [x^T, 1]]. The projection objective ||x - x0||^2
+    is lifted to tr(X) - 2 x0^T x, which agrees with it whenever M is rank 1.
+    """
+
+    def __init__(self, config: Dict, bus_index: int, load_index: int):
+        self.config = config
+        self.bus_index = bus_index
+        self.load_index = load_index
+
+        V_max = config["V_max"][bus_index]
+        V_min = config["V_min"][bus_index]
+        # A load draws power from the network, i.e. it injects the negative
+        # of its consumption.
+        self.S = -(config["load_P"][load_index] + 1j * config["load_Q"][load_index])
+
+        self.M = cp.Variable((5, 5), PSD=True)
+        self.x0 = cp.Parameter(4)
+
+        X = self.M[:4, :4]
+        x = self.M[:4, 4]
+
+        P = X[0, 2] + X[1, 3]  # V_re*I_re + V_im*I_im
+        Q = X[1, 2] - X[0, 3]  # V_im*I_re - V_re*I_im
+        V_sq = X[0, 0] + X[1, 1]  # V_re^2 + V_im^2
+
+        objective = cp.trace(X) - 2 * self.x0 @ x
+
+        constraints = [
+            self.M[4, 4] == 1,
+            P == np.real(self.S),
+            Q == np.imag(self.S),
+            V_sq <= V_max,
+            V_sq >= V_min,
+        ]
+
+        self.problem = cp.Problem(cp.Minimize(objective), constraints)
+
+    def prox(self, z: ZDict, rho: float = 1.0) -> ZDict:
+        ret = z.copy()
+        V0 = ret["v"][0]
+        I0 = ret["i"][0]
+
+        self.x0.value = np.array([np.real(V0), np.imag(V0), np.real(I0), np.imag(I0)])
+
+        self.problem.solve()
+
+        if self.problem.status not in ["optimal", "optimal_inaccurate"]:
+            raise ValueError(f"Optimization did not converge: {self.problem.status}")
+
+        if self.M.value is None:
+            raise ValueError("Optimization did not converge: M is None.")
+
+        x = self.M.value[:4, 4]
+        ret["v"][0] = x[0] + 1j * x[1]
+        ret["i"][0] = x[2] + 1j * x[3]
+        ret["s"][0] = self.S
+
+        return ret
+
 class Generator(Proxable):
     """
     A class implementing projections onto the behaviour of a flexible generator
@@ -207,6 +272,74 @@ class Generator(Proxable):
         ret["v"][0] = sol.value(self.V_re) + 1j * sol.value(self.V_im)
         ret["i"][0] = sol.value(self.I_re) + 1j * sol.value(self.I_im)
         ret["s"][0] = sol.value(self.P) + 1j * sol.value(self.Q)
+
+        return ret
+
+class GeneratorSDP(Proxable):
+    """
+    Exactly like Generator, except the projection is computed via an SDP
+    relaxation. With x = (V_re, V_im, I_re, I_im) the bilinear expressions for
+    P and Q and the nonconvex lower voltage bound are linear in the lifted
+    matrix X = x x^T, and X = x x^T is relaxed to X >= x x^T, encoded as the
+    PSD matrix M = [[X, x], [x^T, 1]]. The projection objective
+    ||x - x0||^2 + (P - P0)^2 + (Q - Q0)^2 is lifted to
+    tr(X) - 2 x0^T x + (P - P0)^2 + (Q - Q0)^2, which agrees with it whenever
+    M is rank 1.
+    """
+
+    def __init__(self, config: Dict, bus_index: int, gen_index: int):
+        self.config = config
+        self.bus_index = bus_index
+        self.gen_index = gen_index
+
+        V_min = config["V_min"][bus_index]
+        V_max = config["V_max"][bus_index]
+
+        self.M = cp.Variable((5, 5), PSD=True)
+        self.x0 = cp.Parameter(4)
+        self.P0 = cp.Parameter()
+        self.Q0 = cp.Parameter()
+
+        X = self.M[:4, :4]
+        x = self.M[:4, 4]
+
+        self.P = X[0, 2] + X[1, 3]  # V_re*I_re + V_im*I_im
+        self.Q = X[1, 2] - X[0, 3]  # V_im*I_re - V_re*I_im
+        V_sq = X[0, 0] + X[1, 1]  # V_re^2 + V_im^2
+
+        objective = (cp.trace(X) - 2 * self.x0 @ x
+                     + cp.square(self.P - self.P0) + cp.square(self.Q - self.Q0))
+
+        constraints = [
+            self.M[4, 4] == 1,
+            V_sq <= V_max,
+            V_sq >= V_min,
+        ]
+
+        self.problem = cp.Problem(cp.Minimize(objective), constraints)
+
+    def prox(self, z: ZDict, rho: float = 1.0) -> ZDict:
+        ret = z.copy()
+        V0 = ret["v"][0]
+        I0 = ret["i"][0]
+        S = ret["s"][0]
+
+        self.x0.value = np.array([np.real(V0), np.imag(V0), np.real(I0), np.imag(I0)])
+        self.P0.value = np.real(S)
+        self.Q0.value = np.imag(S)
+
+        self.problem.solve()
+
+        if self.problem.status not in ["optimal", "optimal_inaccurate"]:
+            raise ValueError(f"Optimization did not converge: {self.problem.status}")
+
+        if self.M.value is None or self.P.value is None or self.Q.value is None:
+            raise ValueError("Optimization did not converge: one of the variables is None.")
+
+        x = self.M.value[:4, 4]
+        ret["v"][0] = x[0] + 1j * x[1]
+        ret["i"][0] = x[2] + 1j * x[3]
+        ret["s"][0] = float(self.P.value) + 1j * float(self.Q.value)
 
         return ret
 
@@ -338,13 +471,13 @@ def admm(f: Proxable,
     us: list[ZDict] = [z0.zeroslike()]
 
     rs = [(xs[-1] - zs[-1]).norm()]
-    ss = [(zs[-1] - zs[-1]).norm()]  # Initialize ss with zero since there's no previous z
+    ss = [(xs[-1] - zs[-1]).norm()] 
     rhos = [2.0]
 
     for iteration in range(max_iterations-1):
         new_rho = rho(iteration, rhos[-1], rs[-1], ss[-1])
         rhos.append(new_rho)
-        # Rescale u when rho changes to keep λ = rho*u continuous
+        # Rescale u when rho changes to keep y = rho*u continuous
         if new_rho != rhos[-2]:
             us[-1] = us[-1] * (rhos[-2] / new_rho)
 
@@ -389,7 +522,7 @@ def make_config():
 
     return config
 
-def solve_opf_centralized(config: Dict):
+def solve_opf_centralized(config: Dict) -> ZDict:
     G = config["G"]
     B = config["B"]
     n_buses = config["n_buses"]
@@ -456,7 +589,14 @@ def solve_opf_centralized(config: Dict):
     print("P:", sol.value(P))
     print("Q:", sol.value(Q))
 
-    return sol
+    # Pack solution into ZDict
+    ret = ZDict({
+        "v": sol.value(V_re) + 1j * sol.value(V_im),
+        "i": sol.value(I_re) + 1j * sol.value(I_im),
+        "s": sol.value(P) + 1j * sol.value(Q),
+    })
+
+    return ret
 
 def check_solution(z: ZDict, config: Dict) -> Dict[str, float]:
     """
@@ -508,39 +648,52 @@ def check_solution(z: ZDict, config: Dict) -> Dict[str, float]:
         "generation_residual": generation_residual,
     }
 
-def rho_heuristic(iteration, rho_prev, r, s, tau=2, mu=10):
-	if rho_prev == 0:
-		return 2.0
-	elif np.linalg.norm(r) > mu*np.linalg.norm(s):
-		print(f"Warning: Norm of r at iteration {iteration} is {np.linalg.norm(r)}, multiplying rho by {tau} \n\n\n")
-		return tau * rho_prev
-	elif np.linalg.norm(s) > mu*np.linalg.norm(r):
-		print(f"Warning: Norm of s at iteration {iteration} is {np.linalg.norm(s)}, dividing rho by {tau} \n\n\n")
-		return rho_prev / tau
-	else:
-		return rho_prev
+def rho_heuristic(iteration, rho_prev, r, s, tau=1.5, mu=10):
+    if rho_prev == 0:
+        return 2.0
+    elif np.linalg.norm(r) > mu*np.linalg.norm(s):
+        print(f"Warning: Norm of r at iteration {iteration} is {np.linalg.norm(r)}, multiplying rho by {tau} \n\n\n")
+        return tau * rho_prev
+    elif np.linalg.norm(s) > mu*np.linalg.norm(r):
+        print(f"Warning: Norm of s at iteration {iteration} is {np.linalg.norm(s)}, dividing rho by {tau} \n\n\n")
+        return rho_prev / tau
+    else:
+        return rho_prev
+    
+def rho_constant(iteration, rho_prev, r, s):
+    return 2.0
+    
 
-def solve_opf_admm(config: Dict) -> ZDict:
+def solve_opf_admm(config: Dict, z0: ZDict | None = None, relaxation: str | None = None) -> ZDict:
     n_buses = config["n_buses"]
     n_gens = config["n_gens"]
 
+    if relaxation == "sdp":
+        gen = GeneratorSDP
+        load = ConstPowerLoadSDP
+    else:
+        gen = Generator
+        load = ConstPowerLoad
+
+
     f = F(config)
     g = BusBehaviours([
-        *(Generator(config, bus_index=i, gen_index=i) for i in range(n_gens)),
-        *(ConstPowerLoad(config, bus_index=i, load_index=i - n_gens) for i in range(n_gens, n_buses)),
+        *(gen(config, bus_index=i, gen_index=i) for i in range(n_gens)),
+        *(load(config, bus_index=i, load_index=i - n_gens) for i in range(n_gens, n_buses)),
     ])
 
-    z0 = ZDict({
-        "v": np.ones(n_buses, dtype=complex),
-        "i": np.zeros(n_buses, dtype=complex),
-        "s": np.zeros(n_buses, dtype=complex),
-    })
+    if z0 is None:
+        z0 = ZDict({
+            "v": np.ones(n_buses, dtype=complex),
+            "i": np.zeros(n_buses, dtype=complex),
+            "s": np.zeros(n_buses, dtype=complex),
+        })
 
     def callback(iteration, x, z, u, r, s):
         if iteration % 10 == 0:
             print(f"iter {iteration:4d}: r={r:.6f}, s={s:.6f}")
 
-    xs, zs, us, rs, ss, rhos = admm(f, g, z0, rho=rho_heuristic, threshold=5e-5, max_iterations=10000, callback=callback)
+    xs, zs, us, rs, ss, rhos = admm(f, g, z0, rho=rho_constant, threshold=5e-5, max_iterations=10000, callback=callback)
 
     print("V:", xs[-1]["v"])
     print("I:", xs[-1]["i"])
@@ -559,8 +712,10 @@ def solve_opf_admm(config: Dict) -> ZDict:
 
 if __name__ == "__main__":
     config = make_config()
-    # sol = solve_opf_centralized(config)
+    centralized_sol = solve_opf_centralized(config)
 
-    sol = solve_opf_admm(config)
-    checks = check_solution(sol, config)
-    print(checks)
+    admm_sol = solve_opf_admm(config, relaxation=None)
+    # checks = check_solution(centralized_sol, config)
+    # print(checks)
+
+    print("Norm of difference between centralized and ADMM solutions:", (centralized_sol - admm_sol).norm())
