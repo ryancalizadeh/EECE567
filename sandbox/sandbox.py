@@ -2,8 +2,25 @@ import numpy as np
 import casadi as ca
 import cvxpy as cp
 import matplotlib.pyplot as plt
+import warnings
 from typing import Callable, Dict, Union, overload, cast
-from abc import ABC, abstractmethod\
+from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
+
+def check_rank_one(M: np.ndarray, name: str, tol: float = 1e-4) -> None:
+    """
+    Warns if the PSD matrix M is not (approximately) rank one, i.e. if the SDP
+    relaxation M >= x x^T is not tight at the solution.
+    """
+    eigvals = np.linalg.eigvalsh(M)
+    if eigvals[-1] <= 0:
+        return
+    if eigvals[-2] > tol * eigvals[-1]:
+        warnings.warn(
+            f"{name}: SDP relaxation is not tight (rank-one condition violated). "
+            f"Second-largest eigenvalue {eigvals[-2]:.3e} is not negligible "
+            f"relative to the largest {eigvals[-1]:.3e}."
+        )
 
 class ZDict:
     """
@@ -208,6 +225,8 @@ class ConstPowerLoadSDP(Proxable):
         if self.M.value is None:
             raise ValueError("Optimization did not converge: M is None.")
 
+        check_rank_one(self.M.value, "ConstPowerLoadSDP")
+
         x = self.M.value[:4, 4]
         ret["v"][0] = x[0] + 1j * x[1]
         ret["i"][0] = x[2] + 1j * x[3]
@@ -336,6 +355,8 @@ class GeneratorSDP(Proxable):
         if self.M.value is None or self.P.value is None or self.Q.value is None:
             raise ValueError("Optimization did not converge: one of the variables is None.")
 
+        check_rank_one(self.M.value, "GeneratorSDP")
+
         x = self.M.value[:4, 4]
         ret["v"][0] = x[0] + 1j * x[1]
         ret["i"][0] = x[2] + 1j * x[3]
@@ -354,6 +375,27 @@ class BusBehaviours(Proxable):
         ret = z.copy()
         for i, behaviour in enumerate(self.behaviours):
             ret_i = behaviour.prox(ret[i:i+1], rho)
+            ret[i] = ret_i[0]
+        return ret
+
+class BusBehavioursParallel(Proxable):
+    """
+    Exactly like BusBehaviours, except each local behaviour's prox is
+    computed in parallel (using a thread pool) rather than sequentially.
+    """
+    def __init__(self, behaviours: list[Proxable]):
+        self.behaviours = behaviours
+
+    def prox(self, z: ZDict, rho: float=1.0) -> ZDict:
+        ret = z.copy()
+        with ThreadPoolExecutor(max_workers=len(self.behaviours)) as executor:
+            futures = [
+                executor.submit(behaviour.prox, z[i:i+1], rho)
+                for i, behaviour in enumerate(self.behaviours)
+            ]
+            results = [f.result() for f in futures]
+
+        for i, ret_i in enumerate(results):
             ret[i] = ret_i[0]
         return ret
 
@@ -519,6 +561,49 @@ def make_config():
     config["P_min"] = np.array([0.2, 0.2])
     config["Q_max"] = np.array([1.3, 1.3])
     config["Q_min"] = np.array([-0.2, -0.2])
+
+    return config
+
+def make_config_9_bus():
+    config = {}
+    n_buses = 9
+    n_gens = 3
+
+    Y_bus = np.zeros((n_buses, n_buses), dtype=complex)
+    lines = [
+        (0, 3, 0.01 + 0.05j),
+        (1, 7, 0.01 + 0.05j),
+        (2, 5, 0.01 + 0.05j),
+        (6, 7, 0.01 + 0.05j),
+        (5, 7, 0.01 + 0.05j),
+        (5, 4, 0.01 + 0.05j),
+        (4, 3, 0.01 + 0.05j),
+        (3, 8, 0.01 + 0.05j),
+        (8, 7, 0.01 + 0.05j)]
+
+    for i, j, v in lines:
+        y = 1 / v
+        Y_bus[i, j] = -y
+        Y_bus[j, i] = -y
+        Y_bus[i, i] += y
+        Y_bus[j, j] += y
+    
+    print("Y_bus:\n", Y_bus)
+
+    config["n_buses"] = n_buses
+    config["n_gens"] = n_gens
+    config["Y_bus"] = Y_bus
+    config["G"] = np.real(Y_bus)
+    config["B"] = np.imag(Y_bus)
+    config["costs"] = np.array([1.0, 1.2, 1.5])
+    config["load_P"] = np.array([0.2, 0.5, 0.6, 0.1, 0.2, 0.9])
+    config["load_Q"] = np.array([0.2, 0.5, 0.3, 0.5, -0.3, 0.5])
+    config["V_max"] = np.array([1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1])
+    config["V_min"] = np.array([0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9])
+    config["P_max"] = np.array([1.2, 1.2, 1.2])
+    config["P_min"] = np.array([0.2, 0.2, 0.2])
+    config["Q_max"] = np.array([1.3, 1.3, 1.3])
+    config["Q_min"] = np.array([-0.2, -0.2, -0.2])
 
     return config
 
