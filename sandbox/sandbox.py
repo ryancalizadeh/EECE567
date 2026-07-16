@@ -92,6 +92,12 @@ class ZDict:
     def __neg__(self) -> "ZDict":
         return self.__mul__(-1)
 
+    def __repr__(self) -> str:
+        return f"ZDict({self.data})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
     def norm(self) -> float:
         return float(np.linalg.norm(np.concatenate([v.ravel() for v in self.data.values()])))
 
@@ -269,6 +275,10 @@ class Generator(Proxable):
         self.opti.subject_to(self.V_re**2 + self.V_im**2 <= V_max)
         self.opti.subject_to(self.V_re**2 + self.V_im**2 >= V_min)
 
+        if bus_index == 0:
+            # Reference (slack) bus angle, matching the centralized formulation.
+            self.opti.subject_to(self.V_im == 0)
+
         opts = {'ipopt.print_level': 0, 'print_time': 0, 'ipopt.sb': 'yes'}
         self.opti.solver('ipopt', opts)
 
@@ -334,6 +344,14 @@ class GeneratorSDP(Proxable):
             V_sq <= V_max,
             V_sq >= V_min,
         ]
+
+        if bus_index == 0:
+            # Reference (slack) bus angle, matching the centralized formulation.
+            # Constraining both x[1] and X[1, 1] to 0 pins V_im exactly (rather
+            # than just its mean under the relaxation), which also forces the
+            # corresponding 2x2 PSD block to be rank one.
+            constraints.append(x[1] == 0)
+            constraints.append(X[1, 1] == 0)
 
         self.problem = cp.Problem(cp.Minimize(objective), constraints)
 
@@ -573,9 +591,9 @@ def make_config_9_bus():
     lines = [
         (0, 3, 0.01 + 0.05j),
         (1, 7, 0.01 + 0.05j),
-        (2, 5, 0.01 + 0.05j),
-        (6, 7, 0.01 + 0.05j),
-        (5, 7, 0.01 + 0.05j),
+        (7, 6, 0.01 + 0.05j),
+        (6, 5, 0.01 + 0.05j),
+        (5, 2, 0.01 + 0.05j),
         (5, 4, 0.01 + 0.05j),
         (4, 3, 0.01 + 0.05j),
         (3, 8, 0.01 + 0.05j),
@@ -587,8 +605,6 @@ def make_config_9_bus():
         Y_bus[j, i] = -y
         Y_bus[i, i] += y
         Y_bus[j, j] += y
-    
-    print("Y_bus:\n", Y_bus)
 
     config["n_buses"] = n_buses
     config["n_gens"] = n_gens
@@ -598,11 +614,11 @@ def make_config_9_bus():
     config["costs"] = np.array([1.0, 1.2, 1.5])
     config["load_P"] = np.array([0.2, 0.5, 0.6, 0.1, 0.2, 0.9])
     config["load_Q"] = np.array([0.2, 0.5, 0.3, 0.5, -0.3, 0.5])
-    config["V_max"] = np.array([1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1, 1.1])
-    config["V_min"] = np.array([0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9])
-    config["P_max"] = np.array([1.2, 1.2, 1.2])
+    config["V_max"] = np.array([1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5])
+    config["V_min"] = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5])
+    config["P_max"] = np.array([1.9, 1.9, 1.9])
     config["P_min"] = np.array([0.2, 0.2, 0.2])
-    config["Q_max"] = np.array([1.3, 1.3, 1.3])
+    config["Q_max"] = np.array([1.7, 1.7, 1.7])
     config["Q_min"] = np.array([-0.2, -0.2, -0.2])
 
     return config
@@ -666,13 +682,6 @@ def solve_opf_centralized(config: Dict) -> ZDict:
     opti.solver('ipopt')
 
     sol = opti.solve()
-
-    print("V_re:", sol.value(V_re))
-    print("V_im:", sol.value(V_im))
-    print("I_re:", sol.value(I_re))
-    print("I_im:", sol.value(I_im))
-    print("P:", sol.value(P))
-    print("Q:", sol.value(Q))
 
     # Pack solution into ZDict
     ret = ZDict({
@@ -746,10 +755,10 @@ def rho_heuristic(iteration, rho_prev, r, s, tau=1.5, mu=10):
         return rho_prev
     
 def rho_constant(iteration, rho_prev, r, s):
-    return 2.0
+    return 4.0
     
 
-def solve_opf_admm(config: Dict, z0: ZDict | None = None, relaxation: str | None = None) -> ZDict:
+def solve_opf_admm(config: Dict, threshold: float = 5e-5, z0: ZDict | None = None, relaxation: str | None = None) -> ZDict:
     n_buses = config["n_buses"]
     n_gens = config["n_gens"]
 
@@ -778,7 +787,7 @@ def solve_opf_admm(config: Dict, z0: ZDict | None = None, relaxation: str | None
         if iteration % 10 == 0:
             print(f"iter {iteration:4d}: r={r:.6f}, s={s:.6f}")
 
-    xs, zs, us, rs, ss, rhos = admm(f, g, z0, rho=rho_constant, threshold=5e-5, max_iterations=10000, callback=callback)
+    xs, zs, us, rs, ss, rhos = admm(f, g, z0, rho=rho_constant, threshold=threshold, max_iterations=10000, callback=callback)
 
     print("V:", xs[-1]["v"])
     print("I:", xs[-1]["i"])
@@ -796,11 +805,16 @@ def solve_opf_admm(config: Dict, z0: ZDict | None = None, relaxation: str | None
     return xs[-1]
 
 if __name__ == "__main__":
-    config = make_config()
+    config = make_config_9_bus()
     centralized_sol = solve_opf_centralized(config)
+    print("Centralized solution:", centralized_sol)
+    # exit()
 
-    admm_sol = solve_opf_admm(config, relaxation=None)
+    admm_sol = solve_opf_admm(config, relaxation="sdp")
     # checks = check_solution(centralized_sol, config)
     # print(checks)
 
     print("Norm of difference between centralized and ADMM solutions:", (centralized_sol - admm_sol).norm())
+    print("Centralized solution:", centralized_sol)
+    print("ADMM solution:", admm_sol)
+    print("Diff:", centralized_sol - admm_sol)
